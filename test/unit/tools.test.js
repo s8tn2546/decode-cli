@@ -58,8 +58,8 @@ describe('toolRegistry', () => {
 
   it('listTools returns all registered tools', () => {
     const names = listTools().map((t) => t.name);
-    expect(names).toEqual(expect.arrayContaining(['read_file', 'list_files', 'search_files', 'propose_change']));
-    expect(names).toHaveLength(4);
+    expect(names).toEqual(expect.arrayContaining(['read_file', 'list_files', 'search_files', 'propose_change', 'run_command', 'git_status', 'git_diff', 'git_log']));
+    expect(names).toHaveLength(8);
   });
 
   it('clearRegistry removes all tools', () => {

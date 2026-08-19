@@ -158,7 +158,11 @@ export class ToolExecutor {
 
     const tool = getTool(name);
 
-    if (tool.permission !== Permission.READ_ONLY) {
+    if (
+      tool.permission !== Permission.READ_ONLY &&
+      tool.permission !== Permission.EXECUTE &&
+      tool.permission !== Permission.GIT
+    ) {
       return errorResult(`Tool "${name}" is not available in this phase`, 'PERMISSION_DENIED');
     }
 

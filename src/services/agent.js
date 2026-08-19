@@ -30,14 +30,13 @@ function generateId() {
 }
 
 /**
- * Convert the current READ_ONLY registry into the provider tool schema.
- * Only READ_ONLY tools are exposed — write/execute/git tools are never sent
- * to the LLM.
+ * Convert registered tool definitions into the provider schema.
+ * All non-WRITE tools are exposed — write tools are never sent to the LLM.
  * @returns {Array<object>}
  */
 function buildToolSchemas() {
   return listTools()
-    .filter((t) => t.permission === Permission.READ_ONLY)
+    .filter((t) => t.permission !== Permission.WRITE)
     .map((t) => ({
       type: 'function',
       function: {
