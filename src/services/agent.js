@@ -21,12 +21,30 @@ import { AGENT_SYSTEM_PROMPT } from './agentPrompt.js';
 import { ProposedChange } from './proposedChange.js';
 
 export const MAX_ITERATIONS = 10;
+export const MAX_HISTORY_SIZE = 50;
+export const MAX_TOOL_OUTPUT_SIZE = 65536;
+export const MAX_TOOL_CALLS_PER_ITERATION = 5;
+export const MAX_PROPOSED_FILES = 10;
+export const MAX_PROPOSAL_SIZE = 262144;
+export const MAX_RETRIES_PER_TOOL = 1;
 
 let idCounter = 0;
 
 function generateId() {
   idCounter += 1;
   return `call_${Date.now()}_${idCounter}`;
+}
+
+function truncateToolOutput(raw) {
+  const str = String(raw || '');
+  if (str.length <= MAX_TOOL_OUTPUT_SIZE) return str;
+  return str.slice(0, MAX_TOOL_OUTPUT_SIZE) + '\n... [output truncated]';
+}
+
+function truncateProposalContent(content) {
+  const str = String(content || '');
+  if (str.length <= MAX_PROPOSAL_SIZE) return str;
+  return str.slice(0, MAX_PROPOSAL_SIZE) + '\n... [proposal truncated]';
 }
 
 /**
@@ -178,13 +196,26 @@ function buildMessages(goal, history, provider) {
 
 /**
  * Extract approved proposals from agent history.
+ * Enforces limits on proposal count and size.
  * @param {Array} history
  * @returns {Array<ProposedChange>}
  */
 function extractProposals(history) {
-  return history
+  const proposals = history
     .filter((s) => s.type === 'tool_call' && s.name === 'propose_change' && s.result && s.result.success)
-    .map((s) => new ProposedChange(s.result.data));
+    .map((s) => {
+      const data = s.result.data;
+      return new ProposedChange({
+        path: data.path,
+        originalContent: data.originalContent,
+        proposedContent: truncateProposalContent(data.proposedContent),
+      });
+    });
+
+  if (proposals.length > MAX_PROPOSED_FILES) {
+    return proposals.slice(0, MAX_PROPOSED_FILES);
+  }
+  return proposals;
 }
 
 /**
@@ -192,7 +223,7 @@ function extractProposals(history) {
  *
  * @param {string} goal
  * @param {string} projectRoot
- * @param {{ cwd?: string, fetchImpl?: typeof fetch, maxTokens?: number, verbose?: boolean, maxIterations?: number }} [options={}]
+ * @param {{ cwd?: string, fetchImpl?: typeof fetch, maxTokens?: number, verbose?: boolean, maxIterations?: number, onProgress?: (event: { type: string, detail?: string }) => void }} [options={}]
  * @returns {{ success: boolean, response?: string, error?: string, steps: Array, proposals: Array<ProposedChange> }}
  */
 export async function runAgent(goal, projectRoot, options = {}) {
@@ -202,7 +233,14 @@ export async function runAgent(goal, projectRoot, options = {}) {
     maxTokens,
     verbose,
     maxIterations = MAX_ITERATIONS,
+    onProgress,
   } = options;
+
+  function progress(type, detail) {
+    if (typeof onProgress === 'function') {
+      onProgress({ type, detail });
+    }
+  }
 
   if (!goal || typeof goal !== 'string' || !goal.trim()) {
     return { success: false, error: 'A goal is required', steps: [], proposals: [] };
@@ -228,6 +266,8 @@ export async function runAgent(goal, projectRoot, options = {}) {
   const provider = config.llm.provider || 'other';
   const executor = new ToolExecutor(String(projectRoot || process.cwd()).replace(/\/+$/, ''));
   const history = [];
+  const seenToolCalls = new Set();
+  const retryCount = new Map();
   let iteration = 0;
 
   while (iteration < maxIterations) {
@@ -236,6 +276,7 @@ export async function runAgent(goal, projectRoot, options = {}) {
     const messages = buildMessages(goal, history, provider);
 
     try {
+      progress('thinking', `Step ${iteration}`);
       const response = await generateSummary('', {
         cwd,
         fetchImpl,
@@ -254,6 +295,7 @@ export async function runAgent(goal, projectRoot, options = {}) {
       if (response && response.type === 'tool_call') {
         const toolName = response.name;
         const toolArgs = response.arguments || {};
+        progress('tool', `Running ${toolName}`);
 
         if (!getTool(toolName)) {
           history.push({
@@ -270,7 +312,43 @@ export async function runAgent(goal, projectRoot, options = {}) {
           continue;
         }
 
+        const retries = retryCount.get(toolName) || 0;
+        if (retries >= MAX_RETRIES_PER_TOOL) {
+          history.push({
+            type: 'tool_call',
+            id: generateId(),
+            name: toolName,
+            arguments: toolArgs,
+            result: {
+              success: false,
+              error: { message: `Retry limit exceeded for ${toolName}`, code: 'RETRY_LIMIT_EXCEEDED' },
+            },
+            iteration,
+          });
+          continue;
+        }
+
+        const callKey = `${toolName}:${JSON.stringify(toolArgs)}`;
+        if (seenToolCalls.has(callKey)) {
+          history.push({
+            type: 'tool_call',
+            id: generateId(),
+            name: toolName,
+            arguments: toolArgs,
+            result: {
+              success: false,
+              error: { message: `Repeated tool call detected: ${toolName}`, code: 'REPEATED_CALL' },
+            },
+            iteration,
+          });
+          continue;
+        }
+        seenToolCalls.add(callKey);
+
         const result = await executor.execute(toolName, toolArgs, { projectRoot });
+        if (result.success && typeof result.data === 'string') {
+          result.data = truncateToolOutput(result.data);
+        }
         history.push({
           type: 'tool_call',
           id: generateId(),
@@ -279,6 +357,106 @@ export async function runAgent(goal, projectRoot, options = {}) {
           result,
           iteration,
         });
+        if (history.length > MAX_HISTORY_SIZE) {
+          history.splice(0, history.length - MAX_HISTORY_SIZE);
+        }
+
+        if (!result.success) {
+          retryCount.set(toolName, retries + 1);
+        }
+        continue;
+      }
+
+      if (response && response.type === 'tool_calls' && Array.isArray(response.calls)) {
+        if (response.calls.length > MAX_TOOL_CALLS_PER_ITERATION) {
+          history.push({
+            type: 'text',
+            content: '',
+            iteration,
+          });
+          const proposals = extractProposals(history);
+          return {
+            success: true,
+            response: `Too many tool calls (${response.calls.length}). Maximum allowed per iteration is ${MAX_TOOL_CALLS_PER_ITERATION}.`,
+            steps: history,
+            proposals,
+          };
+        }
+
+        progress('tool', `Running ${response.calls.length} tool(s)`);
+        for (const call of response.calls) {
+          const toolName = call.name;
+          const toolArgs = call.arguments || {};
+          progress('tool', `Running ${toolName}`);
+
+          if (!getTool(toolName)) {
+            history.push({
+              type: 'tool_call',
+              id: generateId(),
+              name: toolName,
+              arguments: toolArgs,
+              result: {
+                success: false,
+                error: { message: `Unknown tool: ${toolName}`, code: 'UNKNOWN_TOOL' },
+              },
+              iteration,
+            });
+            continue;
+          }
+
+          const retries = retryCount.get(toolName) || 0;
+          if (retries >= MAX_RETRIES_PER_TOOL) {
+            history.push({
+              type: 'tool_call',
+              id: generateId(),
+              name: toolName,
+              arguments: toolArgs,
+              result: {
+                success: false,
+                error: { message: `Retry limit exceeded for ${toolName}`, code: 'RETRY_LIMIT_EXCEEDED' },
+              },
+              iteration,
+            });
+            continue;
+          }
+
+          const callKey = `${toolName}:${JSON.stringify(toolArgs)}`;
+          if (seenToolCalls.has(callKey)) {
+            history.push({
+              type: 'tool_call',
+              id: generateId(),
+              name: toolName,
+              arguments: toolArgs,
+              result: {
+                success: false,
+                error: { message: `Repeated tool call detected: ${toolName}`, code: 'REPEATED_CALL' },
+              },
+              iteration,
+            });
+            continue;
+          }
+          seenToolCalls.add(callKey);
+
+          const result = await executor.execute(toolName, toolArgs, { projectRoot });
+          if (result.success && typeof result.data === 'string') {
+            result.data = truncateToolOutput(result.data);
+          }
+          history.push({
+            type: 'tool_call',
+            id: generateId(),
+            name: toolName,
+            arguments: toolArgs,
+            result,
+            iteration,
+          });
+
+          if (!result.success) {
+            retryCount.set(toolName, retries + 1);
+          }
+        }
+        if (history.length > MAX_HISTORY_SIZE) {
+          history.splice(0, history.length - MAX_HISTORY_SIZE);
+        }
         continue;
       }
 
@@ -286,10 +464,28 @@ export async function runAgent(goal, projectRoot, options = {}) {
       const proposals = extractProposals(history);
       return { success: true, response: '', steps: history, proposals };
     } catch (err) {
-      return { success: false, error: err.message || 'Agent execution failed', steps: history, proposals: [] };
+      return { success: false, error: sanitizeError(err.message || 'Agent execution failed'), steps: history, proposals: [] };
     }
   }
 
+  progress('limit', `Stopped after ${maxIterations} iterations`);
   const proposals = extractProposals(history);
   return { success: false, error: `Agent stopped after ${maxIterations} iterations`, steps: history, proposals };
+}
+
+function sanitizeError(message) {
+  const str = String(message || '');
+  if (str.includes('API key') || str.includes('api_key') || str.includes('token')) {
+    return 'Authentication or configuration error. Check your LLM provider settings.';
+  }
+  if (str.includes('ENOENT') || str.includes('spawnSync')) {
+    return 'Command could not be executed. Check that the required tool is available.';
+  }
+  if (str.includes('realpath')) {
+    return 'Path security check failed. The requested path may be outside the project.';
+  }
+  if (str.includes('EACCES') || str.includes('EPERM')) {
+    return 'Permission denied. The agent cannot access the requested resource.';
+  }
+  return str;
 }

@@ -89,6 +89,63 @@ describe('runAgent', () => {
     expect(result.steps.filter((s) => s.type === 'tool_call')).toHaveLength(2);
   });
 
+  it('executes multiple simultaneous tool calls sequentially', async () => {
+    configureLlm();
+    generateSummary.mockResolvedValueOnce({
+      type: 'tool_calls',
+      calls: [
+        { type: 'tool_call', name: 'list_files', arguments: {} },
+        { type: 'tool_call', name: 'read_file', arguments: { path: 'README.md' } },
+      ],
+    }).mockResolvedValueOnce('Done.');
+
+    const result = await runAgent('Multi', projectRoot, { cwd: tmp });
+
+    expect(result.success).toBe(true);
+    expect(result.response).toBe('Done.');
+    expect(result.steps).toHaveLength(3);
+    expect(result.steps.filter((s) => s.type === 'tool_call')).toHaveLength(2);
+    expect(result.steps[0].name).toBe('list_files');
+    expect(result.steps[1].name).toBe('read_file');
+  });
+
+  it('handles mixed successful and failed tool calls', async () => {
+    configureLlm();
+    generateSummary.mockResolvedValueOnce({
+      type: 'tool_calls',
+      calls: [
+        { type: 'tool_call', name: 'read_file', arguments: { path: 'missing.txt' } },
+        { type: 'tool_call', name: 'list_files', arguments: {} },
+      ],
+    }).mockResolvedValueOnce('Done.');
+
+    const result = await runAgent('Mixed', projectRoot, { cwd: tmp });
+
+    expect(result.success).toBe(true);
+    expect(result.steps).toHaveLength(3);
+    expect(result.steps[0].result.success).toBe(false);
+    expect(result.steps[1].result.success).toBe(true);
+  });
+
+  it('reports progress events during execution', async () => {
+    configureLlm();
+    generateSummary.mockResolvedValueOnce(
+      { type: 'tool_call', name: 'list_files', arguments: {} }
+    ).mockResolvedValueOnce('Done.');
+
+    const progressEvents = [];
+    await runAgent('Progress', projectRoot, {
+      cwd: tmp,
+      onProgress: (event) => {
+        progressEvents.push(event);
+      },
+    });
+
+    expect(progressEvents.length).toBeGreaterThan(0);
+    expect(progressEvents.some((e) => e.type === 'thinking')).toBe(true);
+    expect(progressEvents.some((e) => e.type === 'tool')).toBe(true);
+  });
+
   it('returns tool execution error to LLM and continues', async () => {
     configureLlm();
     generateSummary.mockResolvedValueOnce(

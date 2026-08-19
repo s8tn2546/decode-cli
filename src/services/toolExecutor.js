@@ -88,6 +88,7 @@ export function validateArgs(schema = {}, args = {}) {
  *  - Rejects absolute paths outside the project root.
  *  - Rejects `../` traversal that escapes the root.
  *  - Normalizes trailing slashes so prefix checks are reliable.
+ *  - Rejects symlinks that resolve outside the project root.
  *
  * @param {string} relPath
  * @param {string} projectRoot
@@ -99,6 +100,23 @@ export function resolveProjectPath(relPath, projectRoot) {
   if (!resolved.startsWith(root + path.sep) && resolved !== root) {
     throw new Error('Path escapes project root');
   }
+
+  let realRoot = null;
+  let realResolved = null;
+  try {
+    realRoot = fs.realpathSync(root);
+    realResolved = fs.realpathSync(resolved);
+  } catch {
+    // realpath can fail for non-existent paths or permission issues.
+    // Fall back to the resolved-path check above, which already passed.
+  }
+
+  if (realRoot && realResolved) {
+    if (!realResolved.startsWith(realRoot + path.sep) && realResolved !== realRoot) {
+      throw new Error('Path escapes project root via symlink');
+    }
+  }
+
   return resolved;
 }
 

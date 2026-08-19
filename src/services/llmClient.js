@@ -168,12 +168,17 @@ export async function generateSummary(prompt, options = {}) {
   const message = data.choices?.[0]?.message;
 
   if (tools && Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
-    const first = message.tool_calls[0];
-    const args =
-      typeof first.function?.arguments === 'string'
-        ? safeParseJson(first.function.arguments)
-        : (first.function?.arguments || {});
-    return normalizeToolCall(first.function?.name, args);
+    const calls = message.tool_calls.map((tc) => {
+      const args =
+        typeof tc.function?.arguments === 'string'
+          ? safeParseJson(tc.function.arguments)
+          : (tc.function?.arguments || {});
+      return normalizeToolCall(tc.function?.name, args);
+    });
+    if (calls.length === 1) {
+      return calls[0];
+    }
+    return { type: 'tool_calls', calls };
   }
 
   return message?.content ?? '';
