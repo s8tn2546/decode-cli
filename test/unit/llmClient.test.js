@@ -142,4 +142,123 @@ describe('llmClient', () => {
       generateSummary('summarize', { cwd: tmp, fetchImpl: stubFetch({ status: 401, json: {} }) }),
     ).rejects.toThrow(/status 401/);
   });
+
+  it('forwards tools in the OpenAI-compatible request body and parses a tool call response', async () => {
+    saveConnection({ llmProvider: 'openai', llmApiKey: 'sk-test' }, { cwd: tmp });
+    const fetchImpl = stubFetch({
+      json: () => ({
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                {
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: 'read_file', arguments: '{"path":"/src/index.js"}' },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    });
+
+    const tools = [
+      {
+        type: 'function',
+        function: {
+          name: 'read_file',
+          description: 'Read a file',
+          parameters: { type: 'object', properties: { path: { type: 'string' } } },
+        },
+      },
+    ];
+    const result = await generateSummary('summarize', { cwd: tmp, fetchImpl, tools });
+
+    expect(result).toEqual({ type: 'tool_call', name: 'read_file', arguments: { path: '/src/index.js' } });
+    const body = JSON.parse(fetchImpl._options.body);
+    expect(body.tools).toEqual(tools);
+  });
+
+  it('returns text when OpenAI tools are provided but the model does not call any', async () => {
+    saveConnection({ llmProvider: 'openai', llmApiKey: 'sk-test' }, { cwd: tmp });
+    const fetchImpl = stubFetch({
+      json: () => ({ choices: [{ message: { content: 'plain answer' } }] }),
+    });
+
+    const result = await generateSummary('summarize', {
+      cwd: tmp,
+      fetchImpl,
+      tools: [{ type: 'function', function: { name: 'read_file', parameters: {} } }],
+    });
+
+    expect(result).toBe('plain answer');
+  });
+
+  it('falls back to empty object for malformed OpenAI tool-call arguments', async () => {
+    saveConnection({ llmProvider: 'openai', llmApiKey: 'sk-test' }, { cwd: tmp });
+    const fetchImpl = stubFetch({
+      json: () => ({
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                { id: 'call_1', type: 'function', function: { name: 'read_file', arguments: 'not-json' } },
+              ],
+            },
+          },
+        ],
+      }),
+    });
+
+    const result = await generateSummary('summarize', {
+      cwd: tmp,
+      fetchImpl,
+      tools: [{ type: 'function', function: { name: 'read_file', parameters: {} } }],
+    });
+
+    expect(result).toEqual({ type: 'tool_call', name: 'read_file', arguments: {} });
+  });
+
+  it('forwards tools in the Anthropic request body and parses a tool_use response', async () => {
+    saveConnection({ llmProvider: 'anthropic', llmApiKey: 'sk-test' }, { cwd: tmp });
+    const fetchImpl = stubFetch({
+      json: () => ({
+        content: [
+          { type: 'text', text: 'Let me read that.' },
+          { type: 'tool_use', id: 'toolu_1', name: 'read_file', input: { path: '/src/index.js' } },
+        ],
+      }),
+    });
+
+    const tools = [
+      {
+        name: 'read_file',
+        description: 'Read a file',
+        input_schema: { type: 'object', properties: { path: { type: 'string' } } },
+      },
+    ];
+    const result = await generateSummary('summarize', { cwd: tmp, fetchImpl, tools });
+
+    expect(result).toEqual({ type: 'tool_call', name: 'read_file', arguments: { path: '/src/index.js' } });
+    const body = JSON.parse(fetchImpl._options.body);
+    expect(body.tools).toEqual(tools);
+  });
+
+  it('returns text when Anthropic tools are provided but the model does not call any', async () => {
+    saveConnection({ llmProvider: 'anthropic', llmApiKey: 'sk-test' }, { cwd: tmp });
+    const fetchImpl = stubFetch({
+      json: () => ({ content: [{ type: 'text', text: 'no tools needed' }] }),
+    });
+
+    const result = await generateSummary('summarize', {
+      cwd: tmp,
+      fetchImpl,
+      tools: [{ name: 'read_file', description: 'Read', input_schema: {} }],
+    });
+
+    expect(result).toBe('no tools needed');
+  });
 });

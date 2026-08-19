@@ -73,13 +73,35 @@ function logOutgoingRequest(provider, url, model) {
 }
 
 /**
+ * Normalizes a tool call from a provider response into the internal shape
+ * consumed by the Agent layer.
+ *
+ * @param {string} name
+ * @param {object} args
+ * @returns {{ type: "tool_call", name: string, arguments: object }}
+ */
+function normalizeToolCall(name, args) {
+  return { type: 'tool_call', name: String(name || ''), arguments: args && typeof args === 'object' ? args : {} };
+}
+
+/**
  * Requests a text completion (a "summary") from the configured provider.
+ *
+ * When `options.tools` is provided, the array is forwarded to the provider so
+ * the model may emit a structured tool call. If the response contains a tool
+ * call, the function returns a normalized internal object:
+ *
+ *   { type: "tool_call", name: "...", arguments: { ... } }
+ *
+ * Otherwise it returns the plain text response as before. Existing callers
+ * that omit `tools` see no behavior change.
+ *
  * @param {string} prompt
- * @param {{ cwd?: string, fetchImpl?: typeof fetch, maxTokens?: number, verbose?: boolean }} options
- * @returns {Promise<string>} the model's text output
+ * @param {{ cwd?: string, fetchImpl?: typeof fetch, maxTokens?: number, verbose?: boolean, tools?: Array<object> }} options
+ * @returns {Promise<string | { type: "tool_call", name: string, arguments: object }>} the model's text output or a normalized tool call
  */
 export async function generateSummary(prompt, options = {}) {
-  const { cwd, fetchImpl = fetch, maxTokens = MAX_TOKENS, verbose } = options;
+  const { cwd, fetchImpl = fetch, maxTokens = MAX_TOKENS, verbose, tools } = options;
   const { provider, apiKey } = getLlmConnection({ cwd });
 
   if (!provider || !apiKey) {
@@ -109,10 +131,18 @@ export async function generateSummary(prompt, options = {}) {
         model,
         max_tokens: maxTokens,
         messages: [{ role: 'user', content: prompt }],
+        ...(tools ? { tools } : {}),
       }),
     });
     if (!res.ok) throw new Error(`LLM request failed with status ${res.status}`);
     const data = await res.json();
+
+    if (tools && Array.isArray(data.content)) {
+      const toolUse = data.content.find((block) => block.type === 'tool_use');
+      if (toolUse) {
+        return normalizeToolCall(toolUse.name, toolUse.input);
+      }
+    }
     return data.content?.[0]?.text ?? '';
   }
 
@@ -127,9 +157,29 @@ export async function generateSummary(prompt, options = {}) {
       model,
       max_tokens: maxTokens,
       messages: [{ role: 'user', content: prompt }],
+      ...(tools ? { tools } : {}),
     }),
   });
   if (!res.ok) throw new Error(`LLM request failed with status ${res.status}`);
   const data = await res.json();
-  return data.choices?.[0]?.message?.content ?? '';
+  const message = data.choices?.[0]?.message;
+
+  if (tools && Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
+    const first = message.tool_calls[0];
+    const args =
+      typeof first.function?.arguments === 'string'
+        ? safeParseJson(first.function.arguments)
+        : (first.function?.arguments || {});
+    return normalizeToolCall(first.function?.name, args);
+  }
+
+  return message?.content ?? '';
+}
+
+function safeParseJson(raw) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
 }
