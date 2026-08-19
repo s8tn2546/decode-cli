@@ -41,6 +41,23 @@ function truncateToolOutput(raw) {
   return str.slice(0, MAX_TOOL_OUTPUT_SIZE) + '\n... [output truncated]';
 }
 
+function truncateToolData(data) {
+  if (typeof data === 'string') {
+    return truncateToolOutput(data);
+  }
+  if (Array.isArray(data)) {
+    return data.map(truncateToolData);
+  }
+  if (data && typeof data === 'object') {
+    const out = {};
+    for (const [key, value] of Object.entries(data)) {
+      out[key] = truncateToolData(value);
+    }
+    return out;
+  }
+  return data;
+}
+
 function truncateProposalContent(content) {
   const str = String(content || '');
   if (str.length <= MAX_PROPOSAL_SIZE) return str;
@@ -346,8 +363,8 @@ export async function runAgent(goal, projectRoot, options = {}) {
         seenToolCalls.add(callKey);
 
         const result = await executor.execute(toolName, toolArgs, { projectRoot });
-        if (result.success && typeof result.data === 'string') {
-          result.data = truncateToolOutput(result.data);
+        if (result.success) {
+          result.data = truncateToolData(result.data);
         }
         history.push({
           type: 'tool_call',
@@ -438,8 +455,8 @@ export async function runAgent(goal, projectRoot, options = {}) {
           seenToolCalls.add(callKey);
 
           const result = await executor.execute(toolName, toolArgs, { projectRoot });
-          if (result.success && typeof result.data === 'string') {
-            result.data = truncateToolOutput(result.data);
+          if (result.success) {
+            result.data = truncateToolData(result.data);
           }
           history.push({
             type: 'tool_call',
