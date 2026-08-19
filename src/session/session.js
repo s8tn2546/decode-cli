@@ -24,6 +24,7 @@ import {
   executeConfigSet,
   executeConfigReset,
 } from '../commands/config.js';
+import { executeAgent } from '../commands/agent.js';
 
 // ---------------------------------------------------------------------------
 // Dispatch table
@@ -39,6 +40,7 @@ const DISPATCH = {
   'doc check':        { handler: (_args, opts) => executeDocCheck(opts),                         description: 'Check documentation staleness' },
   'audit':            { handler: (_args, opts) => executeAudit(opts),                            description: 'Run a security / quality audit' },
   'ask':              { handler: (args, opts)  => executeAsk(args[0], opts),                     description: 'Ask the AI assistant a question about your project' },
+  'agent':            { handler: (args, opts)  => executeAgent(args[0], opts),                     description: 'Run the DeCode Agent to accomplish a goal' },
   'init':             { handler: (_args, opts) => executeInit(opts),                             description: 'Configure DeCode (LLM key, GitHub token)' },
   'connect':          { handler: (args, opts)  => executeConnect(args[0], opts),                 description: 'Store an LLM API key' },
   'disconnect':       { handler: (_args, opts) => executeDisconnect(opts),                       description: 'Remove stored credentials' },
@@ -83,7 +85,7 @@ export function parseSlashInput(raw) {
 
   // Decide whether the second token is a subcommand or a positional/flag
   const subcommandKeywords = new Set([
-    'list', 'check', 'connect', 'profile', 'analyze', 'set', 'reset',
+    'list', 'check', 'connect', 'profile', 'analyze', 'set', 'reset', 'agent',
   ]);
   let command;
   let rest;

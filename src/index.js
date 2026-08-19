@@ -20,6 +20,7 @@ import { docCommand } from './commands/doc.js';
 import { configCommand } from './commands/config.js';
 import { auditCommand } from './commands/audit.js';
 import { askCommand } from './commands/ask.js';
+import { agentCommand } from './commands/agent.js';
 import { renderLandingScreen } from './commands/help.js';
 import { startSession } from './session/session.js';
 
@@ -40,7 +41,8 @@ program
   .addCommand(docCommand())
   .addCommand(configCommand())
   .addCommand(auditCommand())
-  .addCommand(askCommand());
+  .addCommand(askCommand())
+  .addCommand(agentCommand());
 
 // The built-in help subcommand is replaced by a custom landing screen, so
 // re-register `decode help` manually — unknown subcommands now get a suggestion

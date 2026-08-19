@@ -96,12 +96,15 @@ function normalizeToolCall(name, args) {
  * Otherwise it returns the plain text response as before. Existing callers
  * that omit `tools` see no behavior change.
  *
+ * When `options.messages` is provided, it is used as the full chat history
+ * instead of wrapping `prompt` in a single user message.
+ *
  * @param {string} prompt
- * @param {{ cwd?: string, fetchImpl?: typeof fetch, maxTokens?: number, verbose?: boolean, tools?: Array<object> }} options
+ * @param {{ cwd?: string, fetchImpl?: typeof fetch, maxTokens?: number, verbose?: boolean, tools?: Array<object>, messages?: Array<{role:string,content:string}> }} options
  * @returns {Promise<string | { type: "tool_call", name: string, arguments: object }>} the model's text output or a normalized tool call
  */
 export async function generateSummary(prompt, options = {}) {
-  const { cwd, fetchImpl = fetch, maxTokens = MAX_TOKENS, verbose, tools } = options;
+  const { cwd, fetchImpl = fetch, maxTokens = MAX_TOKENS, verbose, tools, messages } = options;
   const { provider, apiKey } = getLlmConnection({ cwd });
 
   if (!provider || !apiKey) {
@@ -130,7 +133,7 @@ export async function generateSummary(prompt, options = {}) {
       body: JSON.stringify({
         model,
         max_tokens: maxTokens,
-        messages: [{ role: 'user', content: prompt }],
+        messages: messages || [{ role: 'user', content: prompt }],
         ...(tools ? { tools } : {}),
       }),
     });
@@ -156,7 +159,7 @@ export async function generateSummary(prompt, options = {}) {
     body: JSON.stringify({
       model,
       max_tokens: maxTokens,
-      messages: [{ role: 'user', content: prompt }],
+      messages: messages || [{ role: 'user', content: prompt }],
       ...(tools ? { tools } : {}),
     }),
   });
