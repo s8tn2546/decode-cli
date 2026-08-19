@@ -14,6 +14,7 @@ import {
 } from '../commands/github.js';
 import { executeDoc, executeDocCheck } from '../commands/doc.js';
 import { executeAudit } from '../commands/audit.js';
+import { executeAsk } from '../commands/ask.js';
 import { executeInit } from '../commands/init.js';
 import { executeConnect } from '../commands/connect.js';
 import { executeDisconnect } from '../commands/disconnect.js';
@@ -37,6 +38,7 @@ const DISPATCH = {
   'doc':              { handler: (args, opts)  => executeDoc(args[0], opts),                     description: 'Generate documentation' },
   'doc check':        { handler: (_args, opts) => executeDocCheck(opts),                         description: 'Check documentation staleness' },
   'audit':            { handler: (_args, opts) => executeAudit(opts),                            description: 'Run a security / quality audit' },
+  'ask':              { handler: (args, opts)  => executeAsk(args[0], opts),                     description: 'Ask the AI assistant a question about your project' },
   'init':             { handler: (_args, opts) => executeInit(opts),                             description: 'Configure DeCode (LLM key, GitHub token)' },
   'connect':          { handler: (args, opts)  => executeConnect(args[0], opts),                 description: 'Store an LLM API key' },
   'disconnect':       { handler: (_args, opts) => executeDisconnect(opts),                       description: 'Remove stored credentials' },

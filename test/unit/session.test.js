@@ -15,6 +15,7 @@ import {
 } from '../../src/commands/github.js';
 import { executeDoc, executeDocCheck } from '../../src/commands/doc.js';
 import { executeAudit } from '../../src/commands/audit.js';
+import { executeAsk } from '../../src/commands/ask.js';
 import { executeInit } from '../../src/commands/init.js';
 import { executeConnect } from '../../src/commands/connect.js';
 import { executeDisconnect } from '../../src/commands/disconnect.js';
@@ -34,6 +35,7 @@ describe('command module exports', () => {
   it('doc exports executeDoc', () => { expect(typeof executeDoc).toBe('function'); });
   it('doc exports executeDocCheck', () => { expect(typeof executeDocCheck).toBe('function'); });
   it('audit exports executeAudit', () => { expect(typeof executeAudit).toBe('function'); });
+  it('ask exports executeAsk', () => { expect(typeof executeAsk).toBe('function'); });
   it('init exports executeInit', () => { expect(typeof executeInit).toBe('function'); });
   it('connect exports executeConnect', () => { expect(typeof executeConnect).toBe('function'); });
   it('disconnect exports executeDisconnect', () => { expect(typeof executeDisconnect).toBe('function'); });

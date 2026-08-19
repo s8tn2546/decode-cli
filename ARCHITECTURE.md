@@ -59,7 +59,7 @@ Rendering Engine (src/ui/) — used by audit + landing screen
 - `doc` — documentation generation (`doc [message]`, `doc --explain`) and staleness checking (`doc check`).
 - `audit` — composes the API, docs, and repo-health checks into one summary (`--json` / `--ci`); the reference implementation for the rendering engine's Verdict → Evidence → Action pattern.
 - `init` / `connect` / `disconnect` / `status` / `config` — account and settings lifecycle, with global/local config scoping.
-- **Planned (not yet implemented):** `ask` (read-only Q&A) and the AI Agent Fallback (natural-language code edits, PRD story 5).
+- **Planned (not yet implemented):** AI Agent Fallback (natural-language code edits, PRD story 5).
 
 ## Folder Structure
 
@@ -85,7 +85,7 @@ decode-cli/
 │   ├── services/                   # reused logic, unit-testable without the CLI
 │   │   ├── apiChecker.js, auditRunner.js, configStore.js, docGenerator.js,
 │   │   ├── docStaleness.js, githubClient.js, llmClient.js, projectScanner.js,
-│   │   ├── repoAnalyst.js, repoHealth.js, routeDetector.js
+│   │   ├── projectContext.js, assistantPrompt.js, repoAnalyst.js, repoHealth.js, routeDetector.js
 │   ├── ui/                         # composable terminal rendering engine
 │   │   ├── renderer.js  motion.js  screen.js  progress.js
 │   │   ├── divider.js  icons.js  layout.js  panel.js  prompt.js  status.js

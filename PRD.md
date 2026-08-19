@@ -39,6 +39,18 @@ Individual developers and small teams who want fast, scriptable, CI-friendly che
 - **AC1:** `decode audit` runs API check + doc check + repo health check and returns one combined pass/fail summary.
 - **AC2:** `decode audit --ci` returns a CI-friendly exit code reflecting overall pass/fail.
 
+### 4b. Read-Only AI Assistant — **Implemented**
+**As a developer**, I want to ask questions about my project and get code suggestions without leaving the terminal, so I can understand and improve the codebase faster.
+
+- **AC1:** `decode ask <question>` answers read-only questions about the current project, grounded in real project context (package.json, directory structure, and relevant file contents).
+- **AC2:** `/ask <question>` works inside the interactive session and shares the same underlying logic as the one-shot CLI command.
+- **AC3:** The assistant never writes, modifies, or deletes files. When a change is requested, it proposes the exact code in a fenced block with the target file path noted for the human to apply manually.
+- **AC4:** `--file <path>` scopes the context to a specific file instead of auto-detecting.
+- **AC5:** `--json` produces machine-readable output.
+- **AC6:** If the LLM call fails, the command produces a clear error through the existing error-rendering pattern and exits non-zero — it never crashes the session or the CLI.
+
+*(Status: implemented; distinct from and not to be confused with Story 5's full edit-with-approval agent, which remains not started.)*
+
 ### 5. AI Assistant (Natural-Language Code Edits) — **Planned, not yet implemented**
 **As a developer**, I want to describe a code change in plain English and have the AI propose it, so I can move faster without memorizing a command syntax.
 

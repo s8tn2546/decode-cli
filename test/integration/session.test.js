@@ -107,6 +107,14 @@ describe('group-level slash commands', () => {
   });
 });
 
+describe('/ask command', () => {
+  it('shows help when called with no args', async () => {
+    const { stdout, exitCode } = await runSession(['/ask', '/exit']);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('/ask');
+  });
+});
+
 describe('empty input', () => {
   it('re-prompts without error on blank lines', async () => {
     const { stdout, exitCode } = await runSession(['', '   ', '/exit']);
