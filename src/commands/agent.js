@@ -21,11 +21,13 @@ import {
   detectConflicts,
   applyProposals,
 } from '../services/proposedChange.js';
+import { createSession, saveSession, loadSession, listSessions } from '../services/session.js';
+import { validateCommand, parseCommand } from '../services/commandSafety.js';
 import * as ui from '../ui/index.js';
 import * as renderer from '../ui/renderer.js';
 import * as output from '../utils/output.js';
 
-const VERIFY_COMMAND = 'npm test';
+const VERIFY_DEFAULT = 'npm test';
 const VERIFY_TIMEOUT = 120000;
 const VERIFY_OUTPUT_LIMIT = 65536;
 
@@ -35,11 +37,13 @@ export function agentCommand() {
     .argument('[goal]', 'The goal for the agent to accomplish')
     .option('--json', 'Output machine-readable JSON to stdout')
     .option('--verbose', 'Log the exact outgoing LLM request URL and model')
-    .option('--verify', 'Run verification tests after applying changes')
+    .option('--verify [command]', 'Run verification tests after applying changes (default: npm test)')
+    .option('--session <id>', 'Create or resume a named agent session')
+    .option('--resume <id>', 'Resume a previously saved agent session')
     .action(async (goal, opts) => executeAgent(goal, opts));
 }
 
-export { runVerification };
+export { runVerification, listSessions };
 
 export async function executeAgent(goal, opts = {}) {
   try {
@@ -59,7 +63,20 @@ export async function executeAgent(goal, opts = {}) {
   }
 }
 
-async function resolveGoal(goal, _opts) {
+async function resolveGoal(goal, opts) {
+  if (opts.resume) {
+    try {
+      const session = loadSession(process.cwd(), opts.resume);
+      if (session && session.goal) {
+        output.dim(`Resumed session: ${opts.resume} — ${session.goal}`);
+        return session.goal;
+      }
+    } catch (err) {
+      output.error(`Cannot resume session: ${err.message}`);
+      process.exitCode = 1;
+      return null;
+    }
+  }
   if (goal) return goal;
   renderError(new Error('No goal provided. Pass a goal argument: decode agent "your goal"'));
   return null;
@@ -117,9 +134,18 @@ async function renderInteractiveAgent(goal, opts) {
   try {
     result = await runAgent(goal, process.cwd(), {
       verbose: opts.verbose,
+      sessionId: opts.session || opts.resume || undefined,
       onProgress: (event) => {
         if (spinner) {
           spinner.text = event.detail || event.type;
+        }
+      },
+      onSessionEvent: (event) => {
+        if (spinner && event.type === 'session_saved') {
+          spinner.text = `Session saved: ${event.detail}`;
+        }
+        if (spinner && event.type === 'session_loaded') {
+          spinner.text = event.detail || 'Session loaded';
         }
       },
     });
@@ -170,27 +196,14 @@ async function renderInteractiveAgent(goal, opts) {
     output.success(`Applied ${writeResults.length} change(s).`);
     output.plain('');
 
-    if (opts.verify) {
-      output.heading('Verifying changes');
-      output.plain('');
-      const verifySpinner = process.stdout.isTTY ? ora('Running verification...').start() : null;
-      let verifyResult;
-      try {
-        verifyResult = runVerification(process.cwd());
-      } finally {
-        if (verifySpinner) verifySpinner.stop();
-      }
-
-      output.plain('');
-      if (verifyResult.success) {
-        output.success('Verification passed.');
-      } else {
-        output.error('Verification failed.');
-        output.plain(verifyResult.error || 'Unknown error');
-        process.exitCode = 1;
-        return;
-      }
-      output.plain('');
+    const verifyCommand = opts.verify !== false && (opts.verify === true ? VERIFY_DEFAULT : String(opts.verify));
+    if (verifyCommand) {
+      await runVerifyFlow(verifyCommand, process.cwd());
+    }
+  } else if (opts.verify !== false) {
+    const verifyCommand = opts.verify === true ? VERIFY_DEFAULT : String(opts.verify);
+    if (verifyCommand) {
+      await runVerifyFlow(verifyCommand, process.cwd());
     }
   }
 
@@ -208,6 +221,9 @@ async function renderInteractiveAgent(goal, opts) {
   if (proposals.length > 0) {
     meta.push(`${ui.statusDot('pass')}  ${proposals.length} proposed change(s) applied`);
   }
+  if (result.session?.sessionId) {
+    meta.push(`${ui.statusDot('pass')}  Session: ${result.session.sessionId}`);
+  }
 
   const content = [answerBlock, '', '', meta.join('\n')].join('\n');
 
@@ -216,6 +232,29 @@ async function renderInteractiveAgent(goal, opts) {
     context: '— read-only agent',
     content,
   });
+}
+
+async function runVerifyFlow(verifyCommand, projectRoot) {
+  output.heading('Verifying changes');
+  output.plain('');
+  const verifySpinner = process.stdout.isTTY ? ora('Running verification...').start() : null;
+  let verifyResult;
+  try {
+    verifyResult = runVerification(projectRoot, verifyCommand);
+  } finally {
+    if (verifySpinner) verifySpinner.stop();
+  }
+
+  output.plain('');
+  if (verifyResult.success) {
+    output.success('Verification passed.');
+  } else {
+    output.error('Verification failed.');
+    output.plain(verifyResult.error || 'Unknown error');
+    process.exitCode = 1;
+    return;
+  }
+  output.plain('');
 }
 
 function renderError(err) {
@@ -258,9 +297,20 @@ function truncateOutput(raw, limit = VERIFY_OUTPUT_LIMIT) {
   return str.slice(0, limit) + '\n... [output truncated]';
 }
 
-function runVerification(projectRoot) {
+function runVerification(projectRoot, command = VERIFY_DEFAULT) {
+  const safety = validateCommand(command);
+  if (!safety.valid) {
+    return {
+      success: false,
+      exitCode: 1,
+      error: `Verification command not allowed: ${safety.reason}`,
+    };
+  }
+
+  const { cmd, args } = parseCommand(command);
+
   try {
-    const result = spawnSync('npm', ['test'], {
+    const result = spawnSync(cmd, args, {
       cwd: projectRoot,
       encoding: 'utf8',
       timeout: VERIFY_TIMEOUT,
@@ -279,7 +329,7 @@ function runVerification(projectRoot) {
     const errorLines = [];
     if (stderr) errorLines.push(stderr.trim());
     if (stdout) errorLines.push(stdout.trim());
-    const rawError = errorLines.filter(Boolean).join('\n') || `npm test exited with code ${exitCode}`;
+    const rawError = errorLines.filter(Boolean).join('\n') || `${command} exited with code ${exitCode}`;
     return {
       success: false,
       exitCode,

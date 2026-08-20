@@ -19,6 +19,7 @@ import { ToolExecutor } from './toolExecutor.js';
 import { registerBuiltinTools } from './tools.js';
 import { AGENT_SYSTEM_PROMPT } from './agentPrompt.js';
 import { ProposedChange } from './proposedChange.js';
+import { createSession, saveSession, loadSession } from './session.js';
 
 export const MAX_ITERATIONS = 10;
 export const MAX_HISTORY_SIZE = 50;
@@ -41,7 +42,7 @@ function truncateToolOutput(raw) {
   return str.slice(0, MAX_TOOL_OUTPUT_SIZE) + '\n... [output truncated]';
 }
 
-function truncateToolData(data) {
+export function truncateToolData(data) {
   if (typeof data === 'string') {
     return truncateToolOutput(data);
   }
@@ -240,8 +241,8 @@ function extractProposals(history) {
  *
  * @param {string} goal
  * @param {string} projectRoot
- * @param {{ cwd?: string, fetchImpl?: typeof fetch, maxTokens?: number, verbose?: boolean, maxIterations?: number, onProgress?: (event: { type: string, detail?: string }) => void }} [options={}]
- * @returns {{ success: boolean, response?: string, error?: string, steps: Array, proposals: Array<ProposedChange> }}
+ * @param {{ cwd?: string, fetchImpl?: typeof fetch, maxTokens?: number, verbose?: boolean, maxIterations?: number, onProgress?: (event: { type: string, detail?: string }) => void, sessionId?: string, onSessionEvent?: (event: { type: string, detail?: string }) => void }} [options={}]
+ * @returns {{ success: boolean, response?: string, error?: string, steps: Array, proposals: Array<ProposedChange>, session?: object }}
  */
 export async function runAgent(goal, projectRoot, options = {}) {
   const {
@@ -251,11 +252,19 @@ export async function runAgent(goal, projectRoot, options = {}) {
     verbose,
     maxIterations = MAX_ITERATIONS,
     onProgress,
+    sessionId,
+    onSessionEvent,
   } = options;
 
   function progress(type, detail) {
     if (typeof onProgress === 'function') {
       onProgress({ type, detail });
+    }
+  }
+
+  function sessionEvent(type, detail) {
+    if (typeof onSessionEvent === 'function') {
+      onSessionEvent({ type, detail });
     }
   }
 
@@ -287,6 +296,23 @@ export async function runAgent(goal, projectRoot, options = {}) {
   const retryCount = new Map();
   let iteration = 0;
 
+  let session = null;
+  if (sessionId) {
+    try {
+      session = loadSession(projectRoot, sessionId);
+      if (session && session.history) {
+        history.push(...session.history);
+        sessionEvent('session_loaded', `Resumed session: ${sessionId}`);
+      }
+    } catch (err) {
+      sessionEvent('session_loaded', `Failed to resume session: ${err.message}`);
+    }
+  }
+
+  if (!session) {
+    session = createSession({ goal, projectRoot });
+  }
+
   while (iteration < maxIterations) {
     iteration += 1;
     const tools = buildToolSchemas();
@@ -306,7 +332,17 @@ export async function runAgent(goal, projectRoot, options = {}) {
       if (typeof response === 'string') {
         history.push({ type: 'text', content: response, iteration });
         const proposals = extractProposals(history);
-        return { success: true, response, steps: history, proposals };
+        session.history = history;
+        session.proposals = proposals.map((p) => ({
+          path: p.path,
+          originalContent: p.originalContent,
+          proposedContent: p.proposedContent,
+        }));
+        try {
+          saveSession(session, projectRoot);
+          sessionEvent('session_saved', session.sessionId);
+        } catch {}
+        return { success: true, response, steps: history, proposals, session };
       }
 
       if (response && response.type === 'tool_call') {
@@ -392,11 +428,22 @@ export async function runAgent(goal, projectRoot, options = {}) {
             iteration,
           });
           const proposals = extractProposals(history);
+          session.history = history;
+          session.proposals = proposals.map((p) => ({
+            path: p.path,
+            originalContent: p.originalContent,
+            proposedContent: p.proposedContent,
+          }));
+          try {
+            saveSession(session, projectRoot);
+            sessionEvent('session_saved', session.sessionId);
+          } catch {}
           return {
             success: true,
             response: `Too many tool calls (${response.calls.length}). Maximum allowed per iteration is ${MAX_TOOL_CALLS_PER_ITERATION}.`,
             steps: history,
             proposals,
+            session,
           };
         }
 
@@ -479,15 +526,40 @@ export async function runAgent(goal, projectRoot, options = {}) {
 
       history.push({ type: 'text', content: '', iteration });
       const proposals = extractProposals(history);
-      return { success: true, response: '', steps: history, proposals };
+      session.history = history;
+      session.proposals = proposals.map((p) => ({
+        path: p.path,
+        originalContent: p.originalContent,
+        proposedContent: p.proposedContent,
+      }));
+      try {
+        saveSession(session, projectRoot);
+        sessionEvent('session_saved', session.sessionId);
+      } catch {}
+      return { success: true, response: '', steps: history, proposals, session };
     } catch (err) {
-      return { success: false, error: sanitizeError(err.message || 'Agent execution failed'), steps: history, proposals: [] };
+      session.history = history;
+      session.proposals = [];
+      try {
+        saveSession(session, projectRoot);
+        sessionEvent('session_saved', session.sessionId);
+      } catch {}
+      return { success: false, error: sanitizeError(err.message || 'Agent execution failed'), steps: history, proposals: [], session };
     }
   }
 
   progress('limit', `Stopped after ${maxIterations} iterations`);
-  const proposals = extractProposals(history);
-  return { success: false, error: `Agent stopped after ${maxIterations} iterations`, steps: history, proposals };
+  session.history = history;
+  session.proposals = extractProposals(history).map((p) => ({
+    path: p.path,
+    originalContent: p.originalContent,
+    proposedContent: p.proposedContent,
+  }));
+  try {
+    saveSession(session, projectRoot);
+    sessionEvent('session_saved', session.sessionId);
+  } catch {}
+  return { success: false, error: `Agent stopped after ${maxIterations} iterations`, steps: history, proposals: extractProposals(history), session };
 }
 
 function sanitizeError(message) {

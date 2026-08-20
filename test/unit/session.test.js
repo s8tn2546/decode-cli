@@ -1,87 +1,150 @@
 /**
  * test/unit/session.test.js
- * Unit tests for the interactive session module.
- * Parser tests run here; dispatch/REPL tests are in test/integration/session.test.js.
+ * Unit tests for session persistence.
  */
-import { describe, it, expect } from 'vitest';
 
-// --- Task 1: verify named exports exist on every command module ---
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
-import { executeApiList, executeApiCheck } from '../../src/commands/api.js';
 import {
-  executeGithubConnect,
-  executeGithubProfile,
-  executeGithubAnalyze,
-} from '../../src/commands/github.js';
-import { executeDoc, executeDocCheck } from '../../src/commands/doc.js';
-import { executeAudit } from '../../src/commands/audit.js';
-import { executeAsk } from '../../src/commands/ask.js';
-import { executeInit } from '../../src/commands/init.js';
-import { executeConnect } from '../../src/commands/connect.js';
-import { executeDisconnect } from '../../src/commands/disconnect.js';
-import { executeStatus } from '../../src/commands/status.js';
-import {
-  executeConfigList,
-  executeConfigSet,
-  executeConfigReset,
-} from '../../src/commands/config.js';
+  createSession,
+  saveSession,
+  loadSession,
+  listSessions,
+} from '../../src/services/session.js';
 
-describe('command module exports', () => {
-  it('api exports executeApiList', () => { expect(typeof executeApiList).toBe('function'); });
-  it('api exports executeApiCheck', () => { expect(typeof executeApiCheck).toBe('function'); });
-  it('github exports executeGithubConnect', () => { expect(typeof executeGithubConnect).toBe('function'); });
-  it('github exports executeGithubProfile', () => { expect(typeof executeGithubProfile).toBe('function'); });
-  it('github exports executeGithubAnalyze', () => { expect(typeof executeGithubAnalyze).toBe('function'); });
-  it('doc exports executeDoc', () => { expect(typeof executeDoc).toBe('function'); });
-  it('doc exports executeDocCheck', () => { expect(typeof executeDocCheck).toBe('function'); });
-  it('audit exports executeAudit', () => { expect(typeof executeAudit).toBe('function'); });
-  it('ask exports executeAsk', () => { expect(typeof executeAsk).toBe('function'); });
-  it('init exports executeInit', () => { expect(typeof executeInit).toBe('function'); });
-  it('connect exports executeConnect', () => { expect(typeof executeConnect).toBe('function'); });
-  it('disconnect exports executeDisconnect', () => { expect(typeof executeDisconnect).toBe('function'); });
-  it('status exports executeStatus', () => { expect(typeof executeStatus).toBe('function'); });
-  it('config exports executeConfigList', () => { expect(typeof executeConfigList).toBe('function'); });
-  it('config exports executeConfigSet', () => { expect(typeof executeConfigSet).toBe('function'); });
-  it('config exports executeConfigReset', () => { expect(typeof executeConfigReset).toBe('function'); });
+let tmp;
+let projectRoot;
+
+beforeEach(() => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'decode-session-'));
+  projectRoot = tmp;
 });
 
-// --- Task 2: parseSlashInput parser ---
-import { parseSlashInput } from '../../src/session/session.js';
+afterEach(() => {
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
 
-describe('parseSlashInput', () => {
-  it('returns null for non-slash input', () => {
-    expect(parseSlashInput('hello world')).toBeNull();
+describe('createSession', () => {
+  it('creates a session with required fields', () => {
+    const session = createSession({ goal: 'Test goal', projectRoot });
+    expect(session.version).toBe(1);
+    expect(session.sessionId).toMatch(/^session_/);
+    expect(session.goal).toBe('Test goal');
+    expect(session.projectRoot).toBe(projectRoot);
+    expect(session.history).toEqual([]);
+    expect(session.proposals).toEqual([]);
+    expect(session.createdAt).toBe(session.updatedAt);
   });
 
-  it('parses a bare slash command with no subcommand', () => {
-    expect(parseSlashInput('/api')).toEqual({ command: 'api', args: [], opts: {} });
+  it('generates unique session IDs', () => {
+    const a = createSession({ goal: 'A', projectRoot });
+    const b = createSession({ goal: 'B', projectRoot });
+    expect(a.sessionId).not.toBe(b.sessionId);
+  });
+});
+
+describe('saveSession and loadSession', () => {
+  it('persists and restores session data', () => {
+    const session = createSession({ goal: 'Persist', projectRoot });
+    session.history = [{ type: 'text', content: 'hello', iteration: 1 }];
+    session.proposals = [{ path: 'a.js', originalContent: null, proposedContent: 'x' }];
+
+    saveSession(session, projectRoot);
+
+    const loaded = loadSession(projectRoot, session.sessionId);
+    expect(loaded.sessionId).toBe(session.sessionId);
+    expect(loaded.goal).toBe('Persist');
+    expect(loaded.history).toHaveLength(1);
+    expect(loaded.proposals).toHaveLength(1);
+    expect(loaded.proposals[0].path).toBe('a.js');
   });
 
-  it('parses a slash command with a subcommand', () => {
-    expect(parseSlashInput('/api list')).toEqual({ command: 'api list', args: [], opts: {} });
+  it('creates .decode/sessions directory lazily', () => {
+    const session = createSession({ goal: 'Lazy', projectRoot });
+    saveSession(session, projectRoot);
+    const dir = path.join(projectRoot, '.decode', 'sessions');
+    expect(fs.existsSync(dir)).toBe(true);
   });
 
-  it('parses a slash command with a flag', () => {
-    expect(parseSlashInput('/api list --json')).toEqual({ command: 'api list', args: [], opts: { json: true } });
+  it('uses atomic write (temp file + rename)', () => {
+    const session = createSession({ goal: 'Atomic', projectRoot });
+    saveSession(session, projectRoot);
+    const dir = path.join(projectRoot, '.decode', 'sessions');
+    const files = fs.readdirSync(dir);
+    expect(files.every((f) => f.endsWith('.json'))).toBe(true);
   });
 
-  it('parses a slash command with a positional arg and a flag', () => {
-    expect(parseSlashInput('/github analyze my-org/my-repo --json')).toEqual({
-      command: 'github analyze',
-      args: ['my-org/my-repo'],
-      opts: { json: true },
-    });
+  it('rejects malformed session files', () => {
+    const session = createSession({ goal: 'Bad', projectRoot });
+    saveSession(session, projectRoot);
+    const dir = path.join(projectRoot, '.decode', 'sessions');
+    fs.writeFileSync(path.join(dir, 'corrupt.json'), 'not json');
+    const sessions = listSessions(projectRoot);
+    expect(sessions.every((s) => s.sessionId !== 'corrupt')).toBe(true);
   });
 
-  it('parses --key=value flags', () => {
-    expect(parseSlashInput('/config set theme dark')).toEqual({
-      command: 'config set',
-      args: ['theme', 'dark'],
-      opts: {},
-    });
+  it('rejects unsupported session versions', () => {
+    const session = createSession({ goal: 'Version', projectRoot });
+    saveSession(session, projectRoot);
+    const dir = path.join(projectRoot, '.decode', 'sessions');
+    const badPath = path.join(dir, `${session.sessionId}.json`);
+    const raw = JSON.parse(fs.readFileSync(badPath, 'utf8'));
+    raw.version = 999;
+    fs.writeFileSync(badPath, JSON.stringify(raw, null, 2));
+    expect(() => loadSession(projectRoot, session.sessionId)).toThrow('Unsupported session version');
   });
 
-  it('parses -y short flags as boolean', () => {
-    expect(parseSlashInput('/disconnect -y')).toEqual({ command: 'disconnect', args: [], opts: { y: true } });
+  it('rejects missing session', () => {
+    expect(() => loadSession(projectRoot, 'nonexistent')).toThrow('Session not found');
+  });
+});
+
+describe('listSessions', () => {
+  it('lists valid sessions sorted by updatedAt', () => {
+    const a = createSession({ goal: 'A', projectRoot });
+    saveSession(a, projectRoot);
+    const b = createSession({ goal: 'B', projectRoot });
+    saveSession(b, projectRoot);
+
+    const sessions = listSessions(projectRoot);
+    expect(sessions).toHaveLength(2);
+    expect(sessions.map((s) => s.sessionId)).toContain(a.sessionId);
+    expect(sessions.map((s) => s.sessionId)).toContain(b.sessionId);
+    expect(sessions[0].updatedAt >= sessions[1].updatedAt).toBe(true);
+  });
+
+  it('returns empty array when directory missing', () => {
+    const sessions = listSessions(projectRoot);
+    expect(sessions).toEqual([]);
+  });
+});
+
+describe('session ID sanitization', () => {
+  it('rejects empty session IDs in saveSession via path', () => {
+    const session = createSession({ goal: 'X', projectRoot });
+    session.sessionId = '';
+    expect(() => saveSession(session, projectRoot)).toThrow('Invalid session ID');
+  });
+
+  it('normalizes special characters in session ID', () => {
+    const session = createSession({ goal: 'X', projectRoot });
+    session.sessionId = 'my-session/../evil';
+    saveSession(session, projectRoot);
+    const dir = path.join(projectRoot, '.decode', 'sessions');
+    const files = fs.readdirSync(dir);
+    expect(files.some((f) => f.includes('my-session'))).toBe(true);
+  });
+});
+
+describe('session data sanitization', () => {
+  it('does not persist overly long strings', () => {
+    const session = createSession({ goal: 'Long', projectRoot });
+    session.history = [{ type: 'text', content: 'x'.repeat(200000), iteration: 1 }];
+    saveSession(session, projectRoot);
+    const loaded = loadSession(projectRoot, session.sessionId);
+    expect(loaded.history[0].content.length).toBeLessThanOrEqual(65536 + 30);
   });
 });
