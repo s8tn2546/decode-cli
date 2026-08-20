@@ -242,7 +242,7 @@ function extractProposals(history) {
  * @param {string} goal
  * @param {string} projectRoot
  * @param {{ cwd?: string, fetchImpl?: typeof fetch, maxTokens?: number, verbose?: boolean, maxIterations?: number, onProgress?: (event: { type: string, detail?: string }) => void, sessionId?: string, onSessionEvent?: (event: { type: string, detail?: string }) => void }} [options={}]
- * @returns {{ success: boolean, response?: string, error?: string, steps: Array, proposals: Array<ProposedChange>, session?: object }}
+ * @returns {{ success: boolean, response?: string, error?: string, steps: Array, proposals: Array<ProposedChange>, session?: object, appliedProposals?: Array<ProposedChange>, verification?: object, fixAttempts?: number, cancelled?: boolean }}
  */
 export async function runAgent(goal, projectRoot, options = {}) {
   const {
@@ -268,8 +268,15 @@ export async function runAgent(goal, projectRoot, options = {}) {
     }
   }
 
+  function toolProgress(toolName, result) {
+    if (typeof onProgress === 'function') {
+      const status = result && result.success ? 'finished' : 'failed';
+      onProgress({ type: `tool_${status}`, detail: toolName });
+    }
+  }
+
   if (!goal || typeof goal !== 'string' || !goal.trim()) {
-    return { success: false, error: 'A goal is required', steps: [], proposals: [] };
+    return { success: false, error: 'A goal is required', steps: [], proposals: [], cancelled: false };
   }
 
   if (!isLlmConfigured({ cwd })) {
@@ -278,6 +285,7 @@ export async function runAgent(goal, projectRoot, options = {}) {
       error: 'No LLM provider configured. Run `decode init` to connect your LLM provider.',
       steps: [],
       proposals: [],
+      cancelled: false,
     };
   }
 
@@ -285,7 +293,7 @@ export async function runAgent(goal, projectRoot, options = {}) {
 
   const readOnlyTools = listTools().filter((t) => t.permission === Permission.READ_ONLY);
   if (readOnlyTools.length === 0) {
-    return { success: false, error: 'No read-only tools available', steps: [], proposals: [] };
+    return { success: false, error: 'No read-only tools available', steps: [], proposals: [], cancelled: false };
   }
 
   const config = readConfig({ cwd });
@@ -342,7 +350,7 @@ export async function runAgent(goal, projectRoot, options = {}) {
           saveSession(session, projectRoot);
           sessionEvent('session_saved', session.sessionId);
         } catch {}
-        return { success: true, response, steps: history, proposals, session };
+        return { success: true, response, steps: history, proposals, session, cancelled: false };
       }
 
       if (response && response.type === 'tool_call') {
@@ -402,6 +410,7 @@ export async function runAgent(goal, projectRoot, options = {}) {
         if (result.success) {
           result.data = truncateToolData(result.data);
         }
+        toolProgress(toolName, result);
         history.push({
           type: 'tool_call',
           id: generateId(),
@@ -444,6 +453,7 @@ export async function runAgent(goal, projectRoot, options = {}) {
             steps: history,
             proposals,
             session,
+            cancelled: false,
           };
         }
 
@@ -454,6 +464,7 @@ export async function runAgent(goal, projectRoot, options = {}) {
           progress('tool', `Running ${toolName}`);
 
           if (!getTool(toolName)) {
+            toolProgress(toolName, { success: false });
             history.push({
               type: 'tool_call',
               id: generateId(),
@@ -470,6 +481,7 @@ export async function runAgent(goal, projectRoot, options = {}) {
 
           const retries = retryCount.get(toolName) || 0;
           if (retries >= MAX_RETRIES_PER_TOOL) {
+            toolProgress(toolName, { success: false });
             history.push({
               type: 'tool_call',
               id: generateId(),
@@ -486,6 +498,7 @@ export async function runAgent(goal, projectRoot, options = {}) {
 
           const callKey = `${toolName}:${JSON.stringify(toolArgs)}`;
           if (seenToolCalls.has(callKey)) {
+            toolProgress(toolName, { success: false });
             history.push({
               type: 'tool_call',
               id: generateId(),
@@ -505,6 +518,7 @@ export async function runAgent(goal, projectRoot, options = {}) {
           if (result.success) {
             result.data = truncateToolData(result.data);
           }
+          toolProgress(toolName, result);
           history.push({
             type: 'tool_call',
             id: generateId(),
@@ -536,7 +550,7 @@ export async function runAgent(goal, projectRoot, options = {}) {
         saveSession(session, projectRoot);
         sessionEvent('session_saved', session.sessionId);
       } catch {}
-      return { success: true, response: '', steps: history, proposals, session };
+      return { success: true, response: '', steps: history, proposals, session, cancelled: false };
     } catch (err) {
       session.history = history;
       session.proposals = [];
@@ -544,7 +558,7 @@ export async function runAgent(goal, projectRoot, options = {}) {
         saveSession(session, projectRoot);
         sessionEvent('session_saved', session.sessionId);
       } catch {}
-      return { success: false, error: sanitizeError(err.message || 'Agent execution failed'), steps: history, proposals: [], session };
+      return { success: false, error: sanitizeError(err.message || 'Agent execution failed'), steps: history, proposals: [], session, cancelled: false };
     }
   }
 
@@ -559,7 +573,7 @@ export async function runAgent(goal, projectRoot, options = {}) {
     saveSession(session, projectRoot);
     sessionEvent('session_saved', session.sessionId);
   } catch {}
-  return { success: false, error: `Agent stopped after ${maxIterations} iterations`, steps: history, proposals: extractProposals(history), session };
+  return { success: false, error: `Agent stopped after ${maxIterations} iterations`, steps: history, proposals: extractProposals(history), session, cancelled: false };
 }
 
 function sanitizeError(message) {

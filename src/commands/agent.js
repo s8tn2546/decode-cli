@@ -14,6 +14,7 @@ import readline from 'node:readline';
 import { spawnSync } from 'node:child_process';
 import { Command } from 'commander';
 import ora from 'ora';
+import chalk from 'chalk';
 
 import { runAgent, MAX_ITERATIONS } from '../services/agent.js';
 import {
@@ -30,6 +31,7 @@ import * as output from '../utils/output.js';
 const VERIFY_DEFAULT = 'npm test';
 const VERIFY_TIMEOUT = 120000;
 const VERIFY_OUTPUT_LIMIT = 65536;
+const MAX_FIX_ATTEMPTS = 3;
 
 export function agentCommand() {
   return new Command('agent')
@@ -39,6 +41,7 @@ export function agentCommand() {
     .option('--verbose', 'Log the exact outgoing LLM request URL and model')
     .option('--verify [command]', 'Run verification tests after applying changes (default: npm test)')
     .option('--verify-timeout <ms>', 'Verification timeout in milliseconds (default: 120000)')
+    .option('--fix', 'Enable bounded auto-fix loop after verification failure')
     .option('--session <id>', 'Create or resume a named agent session')
     .option('--resume <id>', 'Resume a previously saved agent session')
     .option('--list-sessions', 'List saved agent sessions')
@@ -50,6 +53,10 @@ export { runVerification, listSessions, deleteSession };
 
 export async function executeAgent(goal, opts = {}) {
   try {
+    if (opts.fix && !opts.verify) {
+      opts.verify = true;
+    }
+
     if (opts.listSessions) {
       const sessions = listSessions(process.cwd());
       if (sessions.length === 0) {
@@ -160,8 +167,14 @@ async function promptForApproval(proposals) {
 }
 
 async function renderInteractiveAgent(goal, opts) {
-  const spinner = process.stdout.isTTY ? ora('Agent working...').start() : null;
+  const isTTY = process.stdout.isTTY;
+  const spinner = isTTY ? ora('Agent working...').start() : null;
+  const workflow = [];
   let result;
+  let verifyResult = null;
+  let appliedProposals = [];
+  let fixAttempts = 0;
+  let cancelled = false;
   try {
     result = await runAgent(goal, process.cwd(), {
       verbose: opts.verbose,
@@ -169,6 +182,11 @@ async function renderInteractiveAgent(goal, opts) {
       onProgress: (event) => {
         if (spinner) {
           spinner.text = event.detail || event.type;
+        }
+        if (event.type === 'tool_finished' && event.detail) {
+          workflow.push({ tool: event.detail, status: 'success' });
+        } else if (event.type === 'tool_failed' && event.detail) {
+          workflow.push({ tool: event.detail, status: 'failed' });
         }
       },
       onSessionEvent: (event) => {
@@ -185,30 +203,60 @@ async function renderInteractiveAgent(goal, opts) {
   }
 
   if (!result.success) {
-    renderError(new Error(result.error));
+    if (isTTY) {
+      renderError(new Error(result.error));
+    }
     process.exitCode = 1;
     return;
   }
 
+  if (workflow.length > 0 && isTTY) {
+    output.heading('Workflow');
+    output.plain('');
+    for (const step of workflow) {
+      const icon = step.status === 'success' ? '✓' : '✗';
+      const color = step.status === 'success' ? 'green' : 'red';
+      console.log(chalk[color](`${icon} ${step.tool}`));
+    }
+    output.plain('');
+  }
+
   const proposals = result.proposals || [];
   if (proposals.length > 0) {
-    const conflicts = detectConflicts(proposals, process.cwd());
-    if (conflicts.length > 0) {
-      output.heading('Cannot apply changes');
+    if (isTTY) {
+      output.heading('Proposed changes');
       output.plain('');
-      for (const conflict of conflicts) {
-        output.error(`${conflict.path}: ${conflict.message}`);
+      const filePaths = proposals.map((p) => p.path);
+      output.dim(`${proposals.length} file(s) changed`);
+      output.plain('');
+      for (const fp of filePaths) {
+        output.plain(`  ${fp}`);
       }
       output.plain('');
-      output.dim('Files changed since the proposal was generated. Refusing to overwrite.');
+    }
+
+    const conflicts = detectConflicts(proposals, process.cwd());
+    if (conflicts.length > 0) {
+      if (isTTY) {
+        output.heading('Cannot apply changes');
+        output.plain('');
+        for (const conflict of conflicts) {
+          output.error(`${conflict.path}: ${conflict.message}`);
+        }
+        output.plain('');
+        output.dim('Files changed since the proposal was generated. Refusing to overwrite.');
+      }
       process.exitCode = 1;
       return;
     }
 
     const approved = await promptForApproval(proposals);
     if (!approved) {
-      output.heading('Changes cancelled');
-      output.dim('No files were modified.');
+      cancelled = true;
+      if (isTTY) {
+        output.heading('Changes cancelled');
+        output.dim('No files were modified.');
+      }
       process.exitCode = 0;
       return;
     }
@@ -216,29 +264,118 @@ async function renderInteractiveAgent(goal, opts) {
     const writeResults = applyProposals(proposals, process.cwd());
     const failed = writeResults.filter((r) => !r.success);
     if (failed.length > 0) {
-      output.heading('Write failures');
-      for (const fail of failed) {
-        output.error(`${fail.path}: ${fail.error}`);
+      if (isTTY) {
+        output.heading('Write failures');
+        output.plain('');
+        for (const fail of failed) {
+          output.error(`${fail.path}: ${fail.error}`);
+        }
+        output.plain('');
       }
       process.exitCode = 1;
       return;
     }
 
-    output.success(`Applied ${writeResults.length} change(s).`);
-    output.plain('');
+    appliedProposals = proposals;
+    if (isTTY) {
+      output.success(`Applied ${writeResults.length} change(s).`);
+      output.plain('');
+    }
 
     const verifyCommand = opts.verify !== false && (opts.verify === true ? VERIFY_DEFAULT : String(opts.verify));
     if (verifyCommand) {
       const verifyTimeout = parseVerifyTimeout(opts.verifyTimeout);
-      await runVerifyFlow(verifyCommand, process.cwd(), verifyTimeout);
+      const vResult = runVerification(process.cwd(), verifyCommand, verifyTimeout);
+      if (!vResult.success && opts.fix) {
+        const fixResult = await runAutoFixFlow(vResult, verifyCommand, process.cwd(), verifyTimeout, goal, opts, isTTY);
+        if (!fixResult.success) {
+          process.exitCode = 1;
+          return;
+        }
+        fixAttempts = fixResult.fixAttempts || 0;
+        verifyResult = fixResult.verification || { success: true, command: verifyCommand };
+      } else {
+        verifyResult = await runVerifyFlow(verifyCommand, process.cwd(), verifyTimeout, vResult, isTTY);
+        if (verifyResult && !verifyResult.success) {
+          process.exitCode = 1;
+          return;
+        }
+      }
     }
   } else if (opts.verify !== false) {
     const verifyCommand = opts.verify === true ? VERIFY_DEFAULT : String(opts.verify);
     if (verifyCommand) {
       const verifyTimeout = parseVerifyTimeout(opts.verifyTimeout);
-      await runVerifyFlow(verifyCommand, process.cwd(), verifyTimeout);
+      const vResult = runVerification(process.cwd(), verifyCommand, verifyTimeout);
+      if (!vResult.success && opts.fix) {
+        const fixResult = await runAutoFixFlow(vResult, verifyCommand, process.cwd(), verifyTimeout, goal, opts, isTTY);
+        if (!fixResult.success) {
+          process.exitCode = 1;
+          return;
+        }
+        fixAttempts = fixResult.fixAttempts || 0;
+        verifyResult = fixResult.verification || { success: true, command: verifyCommand };
+      } else {
+        verifyResult = await runVerifyFlow(verifyCommand, process.cwd(), verifyTimeout, vResult, isTTY);
+        if (verifyResult && !verifyResult.success) {
+          process.exitCode = 1;
+          return;
+        }
+      }
     }
   }
+
+  if (opts.json) {
+    const jsonResult = buildJsonResult(result, {
+      appliedProposals,
+      verifyResult,
+      fixAttempts,
+      cancelled,
+    });
+    renderer.render(JSON.stringify(jsonResult, null, 2));
+    return;
+  }
+
+  renderFinalSummary(goal, result, {
+    proposals,
+    appliedProposals,
+    verifyResult,
+    fixAttempts,
+    cancelled,
+    isTTY,
+  });
+}
+
+function buildJsonResult(result, metadata) {
+  return {
+    success: result.success,
+    response: result.response || '',
+    steps: result.steps?.length || 0,
+    toolCalls: (result.steps || []).filter((s) => s.type === 'tool_call').length,
+    proposals: (result.proposals || []).map((p) => ({
+      path: p.path,
+      originalContent: p.originalContent,
+      proposedContent: p.proposedContent,
+    })),
+    appliedProposals: metadata.appliedProposals.map((p) => p.path),
+    verification: metadata.verifyResult
+      ? {
+          attempted: true,
+          success: metadata.verifyResult.success,
+          command: metadata.verifyResult.command,
+          exitCode: metadata.verifyResult.exitCode,
+        }
+      : { attempted: false },
+    sessionId: result.session?.sessionId || null,
+    fixAttempts: metadata.fixAttempts,
+    cancelled: metadata.cancelled,
+    error: result.error || null,
+  };
+}
+
+function renderFinalSummary(goal, result, metadata) {
+  const { proposals, appliedProposals, verifyResult, fixAttempts, cancelled, isTTY } = metadata;
+  const toolCalls = (result.steps || []).filter((s) => s.type === 'tool_call');
 
   const answerBlock = ui.panel({
     title: 'Agent Answer',
@@ -248,14 +385,22 @@ async function renderInteractiveAgent(goal, opts) {
   });
 
   const meta = [];
-  meta.push(`${ui.statusDot('pass')}  ${result.steps.length} step(s)`);
-  const toolCalls = result.steps.filter((s) => s.type === 'tool_call');
+  meta.push(`${ui.statusDot('pass')}  ${result.steps?.length || 0} step(s)`);
   meta.push(`${ui.statusDot('pass')}  ${toolCalls.length} tool call(s)`);
-  if (proposals.length > 0) {
-    meta.push(`${ui.statusDot('pass')}  ${proposals.length} proposed change(s) applied`);
+  if (appliedProposals.length > 0) {
+    meta.push(`${ui.statusDot('pass')}  ${appliedProposals.length} proposed change(s) applied`);
+  }
+  if (verifyResult) {
+    const verifyIcon = verifyResult.success ? 'pass' : 'fail';
+    const verifyLabel = verifyResult.success ? 'Verification passed' : 'Verification failed';
+    meta.push(`${ui.statusDot(verifyIcon)}  ${verifyLabel}: ${verifyResult.command || 'npm test'}`);
+  }
+  if (fixAttempts > 0) {
+    meta.push(`${ui.statusDot('pass')}  Fix attempts: ${fixAttempts}`);
   }
   if (result.session?.sessionId) {
-    meta.push(`${ui.statusDot('pass')}  Session: ${result.session.sessionId}`);
+    const sessionLabel = result.session.sessionId.includes('resumed') ? 'Resumed' : 'Session';
+    meta.push(`${ui.statusDot('pass')}  ${sessionLabel}: ${result.session.sessionId}`);
   }
 
   const content = [answerBlock, '', '', meta.join('\n')].join('\n');
@@ -276,27 +421,165 @@ function parseVerifyTimeout(raw) {
   return parsed;
 }
 
-async function runVerifyFlow(verifyCommand, projectRoot, verifyTimeout = VERIFY_TIMEOUT) {
-  output.heading('Verifying changes');
-  output.plain('');
-  const verifySpinner = process.stdout.isTTY ? ora('Running verification...').start() : null;
-  let verifyResult;
-  try {
-    verifyResult = runVerification(projectRoot, verifyCommand, verifyTimeout);
-  } finally {
-    if (verifySpinner) verifySpinner.stop();
+async function runVerifyFlow(verifyCommand, projectRoot, verifyTimeout = VERIFY_TIMEOUT, precomputedResult, isTTY = true) {
+  if (isTTY) {
+    output.heading('Verifying changes');
+    output.plain('');
+  }
+  const verifySpinner = isTTY ? ora('Running verification...').start() : null;
+  let verifyResult = precomputedResult;
+  if (!verifyResult) {
+    try {
+      verifyResult = runVerification(projectRoot, verifyCommand, verifyTimeout);
+    } finally {
+      if (verifySpinner) verifySpinner.stop();
+    }
   }
 
-  output.plain('');
-  if (verifyResult.success) {
-    output.success('Verification passed.');
-  } else {
-    output.error('Verification failed.');
-    output.plain(verifyResult.error || 'Unknown error');
-    process.exitCode = 1;
-    return;
+  if (isTTY) {
+    output.plain('');
   }
-  output.plain('');
+  if (verifyResult.success) {
+    if (isTTY) {
+      output.success('Verification passed.');
+      output.plain('');
+    }
+  } else {
+    if (isTTY) {
+      output.error('Verification failed.');
+      output.plain(verifyResult.error || 'Unknown error');
+    }
+    process.exitCode = 1;
+    return verifyResult;
+  }
+  return verifyResult;
+}
+
+async function runAutoFixFlow(verifyResult, verifyCommand, projectRoot, verifyTimeout, originalGoal, opts, isTTY = true) {
+  if (isTTY) {
+    output.heading('Auto-fix mode');
+    output.plain('');
+  }
+
+  let attempt = 0;
+  let currentResult = verifyResult;
+
+  while (attempt < MAX_FIX_ATTEMPTS) {
+    if (currentResult.success) {
+      if (isTTY) {
+        output.success('Verification passed.');
+        output.plain('');
+      }
+      return { success: true, fixAttempts: attempt, verification: currentResult };
+    }
+
+    attempt++;
+    if (isTTY) {
+      output.dim(`Fix attempt ${attempt} of ${MAX_FIX_ATTEMPTS}`);
+      output.plain('');
+    }
+
+    const diagnosticContext = [
+      `Command: ${verifyCommand}`,
+      `Exit code: ${currentResult.exitCode}`,
+      '',
+      'Failure output:',
+      truncateOutput(currentResult.stderr || '', VERIFY_OUTPUT_LIMIT),
+    ].join('\n');
+
+    const fixGoal = `Verification failed.\n\n${diagnosticContext}\n\nInvestigate the failure and propose the smallest safe fix. Do not modify files directly. Use propose_change to describe any changes.`;
+
+    const fixSpinner = isTTY ? ora('Agent investigating failure...').start() : null;
+    let fixResult;
+    try {
+      fixResult = await runAgent(fixGoal, projectRoot, {
+        cwd: process.cwd(),
+        verbose: opts.verbose,
+        sessionId: opts.session || opts.resume || undefined,
+        onProgress: (event) => {
+          if (fixSpinner) {
+            fixSpinner.text = event.detail || event.type;
+          }
+        },
+        onSessionEvent: (event) => {
+          if (fixSpinner && event.type === 'session_saved') {
+            fixSpinner.text = `Session saved: ${event.detail}`;
+          }
+          if (fixSpinner && event.type === 'session_loaded') {
+            fixSpinner.text = event.detail || 'Session loaded';
+          }
+        },
+      });
+    } finally {
+      if (fixSpinner) fixSpinner.stop();
+    }
+
+    if (!fixResult.success) {
+      if (isTTY) {
+        output.error('Agent failed to investigate the failure.');
+        output.plain(fixResult.error || 'Unknown error');
+      }
+      return { success: false, fixAttempts: attempt, verification: currentResult };
+    }
+
+    const fixProposals = fixResult.proposals || [];
+    if (fixProposals.length === 0) {
+      if (isTTY) {
+        output.error('Verification failed, but no safe fix was proposed.');
+      }
+      return { success: false, fixAttempts: attempt, verification: currentResult };
+    }
+
+    const conflicts = detectConflicts(fixProposals, projectRoot);
+    if (conflicts.length > 0) {
+      if (isTTY) {
+        output.heading('Cannot apply fix');
+        output.plain('');
+        for (const conflict of conflicts) {
+          output.error(`${conflict.path}: ${conflict.message}`);
+        }
+        output.plain('');
+        output.dim('Files changed since the fix was proposed. Refusing to overwrite.');
+      }
+      return { success: false, fixAttempts: attempt, verification: currentResult };
+    }
+
+    const approved = await promptForApproval(fixProposals);
+    if (!approved) {
+      if (isTTY) {
+        output.heading('Fix cancelled');
+        output.dim('No files were modified.');
+      }
+      return { success: false, fixAttempts: attempt, verification: currentResult, cancelled: true };
+    }
+
+    const writeResults = applyProposals(fixProposals, projectRoot);
+    const failed = writeResults.filter((r) => !r.success);
+    if (failed.length > 0) {
+      if (isTTY) {
+        output.heading('Write failures');
+        output.plain('');
+        for (const fail of failed) {
+          output.error(`${fail.path}: ${fail.error}`);
+        }
+        output.plain('');
+      }
+      return { success: false, fixAttempts: attempt, verification: currentResult };
+    }
+
+    if (isTTY) {
+      output.success(`Applied ${writeResults.length} fix change(s).`);
+      output.plain('');
+    }
+
+    currentResult = runVerification(projectRoot, verifyCommand, verifyTimeout);
+  }
+
+  if (isTTY) {
+    output.error(`Verification failed after ${MAX_FIX_ATTEMPTS} fix attempts.`);
+    output.plain('');
+  }
+  return { success: false, fixAttempts: MAX_FIX_ATTEMPTS, verification: currentResult };
 }
 
 function renderError(err) {
@@ -344,6 +627,7 @@ function runVerification(projectRoot, command = VERIFY_DEFAULT, timeout = VERIFY
   if (!safety.valid) {
     return {
       success: false,
+      command,
       exitCode: 1,
       error: `Verification command not allowed: ${safety.reason}`,
     };
@@ -365,7 +649,7 @@ function runVerification(projectRoot, command = VERIFY_DEFAULT, timeout = VERIFY
     const stderr = truncateOutput(result.stderr || '');
 
     if (exitCode === 0) {
-      return { success: true, exitCode, stdout, stderr };
+      return { success: true, command, exitCode, stdout, stderr };
     }
 
     const errorLines = [];
@@ -374,6 +658,7 @@ function runVerification(projectRoot, command = VERIFY_DEFAULT, timeout = VERIFY
     const rawError = errorLines.filter(Boolean).join('\n') || `${command} exited with code ${exitCode}`;
     return {
       success: false,
+      command,
       exitCode,
       stdout,
       stderr,
@@ -382,6 +667,7 @@ function runVerification(projectRoot, command = VERIFY_DEFAULT, timeout = VERIFY
   } catch (err) {
     return {
       success: false,
+      command,
       exitCode: 1,
       error: sanitizeError(err.message || 'Verification command failed'),
     };
