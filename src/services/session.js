@@ -221,3 +221,19 @@ export function listSessions(projectRoot) {
   sessions.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
   return sessions;
 }
+
+export function deleteSession(projectRoot, sessionId) {
+  const safeId = sanitizeSessionId(sessionId);
+  if (!safeId) {
+    throw new Error('Invalid session ID');
+  }
+  const targetPath = path.join(getSessionDir(projectRoot), `${safeId}.json`);
+  try {
+    fs.unlinkSync(targetPath);
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      throw new Error(`Session not found: ${safeId}`);
+    }
+    throw new Error(`Cannot delete session: ${err.message}`);
+  }
+}

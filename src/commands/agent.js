@@ -21,7 +21,7 @@ import {
   detectConflicts,
   applyProposals,
 } from '../services/proposedChange.js';
-import { createSession, saveSession, loadSession, listSessions } from '../services/session.js';
+import { createSession, saveSession, loadSession, listSessions, deleteSession } from '../services/session.js';
 import { validateCommand, parseCommand } from '../services/commandSafety.js';
 import * as ui from '../ui/index.js';
 import * as renderer from '../ui/renderer.js';
@@ -38,15 +38,46 @@ export function agentCommand() {
     .option('--json', 'Output machine-readable JSON to stdout')
     .option('--verbose', 'Log the exact outgoing LLM request URL and model')
     .option('--verify [command]', 'Run verification tests after applying changes (default: npm test)')
+    .option('--verify-timeout <ms>', 'Verification timeout in milliseconds (default: 120000)')
     .option('--session <id>', 'Create or resume a named agent session')
     .option('--resume <id>', 'Resume a previously saved agent session')
+    .option('--list-sessions', 'List saved agent sessions')
+    .option('--delete-session <id>', 'Delete a saved agent session')
     .action(async (goal, opts) => executeAgent(goal, opts));
 }
 
-export { runVerification, listSessions };
+export { runVerification, listSessions, deleteSession };
 
 export async function executeAgent(goal, opts = {}) {
   try {
+    if (opts.listSessions) {
+      const sessions = listSessions(process.cwd());
+      if (sessions.length === 0) {
+        output.dim('No saved sessions found.');
+      } else {
+        output.heading('Saved sessions');
+        output.plain('');
+        for (const session of sessions) {
+          output.plain(`  ${session.sessionId}`);
+          output.dim(`    Goal: ${session.goal}`);
+          output.dim(`    Updated: ${session.updatedAt}`);
+          output.plain('');
+        }
+      }
+      return;
+    }
+
+    if (opts.deleteSession) {
+      try {
+        deleteSession(process.cwd(), opts.deleteSession);
+        output.success(`Deleted session: ${opts.deleteSession}`);
+      } catch (err) {
+        output.error(`Cannot delete session: ${err.message}`);
+        process.exitCode = 1;
+      }
+      return;
+    }
+
     const resolvedGoal = await resolveGoal(goal, opts);
     if (!resolvedGoal) return;
 
@@ -198,12 +229,14 @@ async function renderInteractiveAgent(goal, opts) {
 
     const verifyCommand = opts.verify !== false && (opts.verify === true ? VERIFY_DEFAULT : String(opts.verify));
     if (verifyCommand) {
-      await runVerifyFlow(verifyCommand, process.cwd());
+      const verifyTimeout = parseVerifyTimeout(opts.verifyTimeout);
+      await runVerifyFlow(verifyCommand, process.cwd(), verifyTimeout);
     }
   } else if (opts.verify !== false) {
     const verifyCommand = opts.verify === true ? VERIFY_DEFAULT : String(opts.verify);
     if (verifyCommand) {
-      await runVerifyFlow(verifyCommand, process.cwd());
+      const verifyTimeout = parseVerifyTimeout(opts.verifyTimeout);
+      await runVerifyFlow(verifyCommand, process.cwd(), verifyTimeout);
     }
   }
 
@@ -234,13 +267,22 @@ async function renderInteractiveAgent(goal, opts) {
   });
 }
 
-async function runVerifyFlow(verifyCommand, projectRoot) {
+function parseVerifyTimeout(raw) {
+  if (raw === undefined || raw === null || raw === '') return VERIFY_TIMEOUT;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`Invalid verify timeout: ${raw}. Must be a positive integer.`);
+  }
+  return parsed;
+}
+
+async function runVerifyFlow(verifyCommand, projectRoot, verifyTimeout = VERIFY_TIMEOUT) {
   output.heading('Verifying changes');
   output.plain('');
   const verifySpinner = process.stdout.isTTY ? ora('Running verification...').start() : null;
   let verifyResult;
   try {
-    verifyResult = runVerification(projectRoot, verifyCommand);
+    verifyResult = runVerification(projectRoot, verifyCommand, verifyTimeout);
   } finally {
     if (verifySpinner) verifySpinner.stop();
   }
@@ -297,7 +339,7 @@ function truncateOutput(raw, limit = VERIFY_OUTPUT_LIMIT) {
   return str.slice(0, limit) + '\n... [output truncated]';
 }
 
-function runVerification(projectRoot, command = VERIFY_DEFAULT) {
+function runVerification(projectRoot, command = VERIFY_DEFAULT, timeout = VERIFY_TIMEOUT) {
   const safety = validateCommand(command);
   if (!safety.valid) {
     return {
@@ -313,7 +355,7 @@ function runVerification(projectRoot, command = VERIFY_DEFAULT) {
     const result = spawnSync(cmd, args, {
       cwd: projectRoot,
       encoding: 'utf8',
-      timeout: VERIFY_TIMEOUT,
+      timeout,
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
     });

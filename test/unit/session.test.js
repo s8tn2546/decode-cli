@@ -13,6 +13,7 @@ import {
   saveSession,
   loadSession,
   listSessions,
+  deleteSession,
 } from '../../src/services/session.js';
 
 let tmp;
@@ -146,5 +147,39 @@ describe('session data sanitization', () => {
     saveSession(session, projectRoot);
     const loaded = loadSession(projectRoot, session.sessionId);
     expect(loaded.history[0].content.length).toBeLessThanOrEqual(65536 + 30);
+  });
+});
+
+describe('deleteSession', () => {
+  it('deletes an existing session', () => {
+    const session = createSession({ goal: 'Delete', projectRoot });
+    saveSession(session, projectRoot);
+    expect(() => loadSession(projectRoot, session.sessionId)).not.toThrow();
+
+    deleteSession(projectRoot, session.sessionId);
+    expect(() => loadSession(projectRoot, session.sessionId)).toThrow('Session not found');
+  });
+
+  it('returns controlled error for missing session', () => {
+    expect(() => deleteSession(projectRoot, 'nonexistent')).toThrow('Session not found');
+  });
+
+  it('rejects invalid session IDs', () => {
+    expect(() => deleteSession(projectRoot, '')).toThrow('Invalid session ID');
+    expect(() => deleteSession(projectRoot, '   ')).toThrow('Invalid session ID');
+    expect(() => deleteSession(projectRoot, '../etc/passwd')).toThrow('Session not found');
+    expect(() => deleteSession(projectRoot, '/absolute/path')).toThrow('Session not found');
+  });
+
+  it('does not affect other sessions', () => {
+    const a = createSession({ goal: 'A', projectRoot });
+    const b = createSession({ goal: 'B', projectRoot });
+    saveSession(a, projectRoot);
+    saveSession(b, projectRoot);
+
+    deleteSession(projectRoot, a.sessionId);
+
+    expect(() => loadSession(projectRoot, a.sessionId)).toThrow('Session not found');
+    expect(() => loadSession(projectRoot, b.sessionId)).not.toThrow();
   });
 });
