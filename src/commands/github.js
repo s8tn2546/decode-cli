@@ -30,6 +30,7 @@ import {
 } from '../services/repoAnalyst.js';
 import { generateSummary, isLlmConfigured } from '../services/llmClient.js';
 import { saveConnection } from '../services/configStore.js';
+import { withPrompt, isInInkSession } from '../ui/ink/promptGuard.js';
 import * as output from '../utils/output.js';
 
 export function githubCommand() {
@@ -47,13 +48,13 @@ export async function executeGithubConnect() {
     output.success(`Authenticated as ${user.login}${user.name ? ` (${user.name})` : ''}`);
   } catch (err) {
     if (/No GitHub token/.test(err.message)) {
-      const { token } = await inquirer.prompt([
+      const { token } = await withPrompt(() => inquirer.prompt([
         {
           type: 'password',
           name: 'token',
           message: 'Paste your GitHub personal access token:',
         },
-      ]);
+      ]));
       try {
         saveConnection({ githubToken: token });
         const client = getGithubClient();
@@ -80,7 +81,7 @@ export async function executeGithubProfile(opts) {
   try {
     const client = getGithubClient();
     const user = await getAuthenticatedUser(client);
-    const spinner = process.stdout.isTTY ? ora('Fetching your repos and commits...').start() : null;
+    const spinner = !isInInkSession() && process.stdout.isTTY ? ora('Fetching your repos and commits...').start() : null;
     let repos = [];
     let activity = { commits: [], detail: [] };
     try {
@@ -110,7 +111,7 @@ export async function executeGithubProfile(opts) {
     if (activity.detail.length > 0 && isLlmConfigured()) {
       const metrics = analyzeActivity(activity.detail);
       const prompt = buildProfileSummaryPrompt(metrics, { login: user.login });
-      const llmSpinner = process.stdout.isTTY ? ora('Summarizing your activity...').start() : null;
+      const llmSpinner = !isInInkSession() && process.stdout.isTTY ? ora('Summarizing your activity...').start() : null;
       try {
         const narrative = await generateSummary(prompt, { verbose: opts.verbose });
         output.printBox('Activity narrative', narrative, { borderColor: 'magenta' });
@@ -193,7 +194,7 @@ export async function executeGithubAnalyze(repoArg, opts) {
 
     const client = getGithubClient();
 
-    const spinner = process.stdout.isTTY ? ora(`Analyzing ${owner}/${repo}...`).start() : null;
+    const spinner = !isInInkSession() && process.stdout.isTTY ? ora(`Analyzing ${owner}/${repo}...`).start() : null;
     let commits;
     try {
       commits = await getRepoCommitsDetailed(client, { owner, repo });
@@ -206,7 +207,7 @@ export async function executeGithubAnalyze(repoArg, opts) {
     let summary = null;
     if (isLlmConfigured()) {
       const prompt = buildSummaryPrompt(analysis, { owner, repo });
-      const llmSpinner = process.stdout.isTTY ? ora('Generating plain-English summary...').start() : null;
+      const llmSpinner = !isInInkSession() && process.stdout.isTTY ? ora('Generating plain-English summary...').start() : null;
       try {
         summary = await generateSummary(prompt, { verbose: opts.verbose });
       } catch (err) {

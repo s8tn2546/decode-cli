@@ -24,13 +24,17 @@ import {
   SCOPE_GLOBAL,
   SCOPE_LOCAL,
 } from '../services/configStore.js';
+import { withPrompt } from '../ui/ink/promptGuard.js';
 import * as ui from '../ui/index.js';
 import * as renderer from '../ui/renderer.js';
 
 export async function executeInit(opts) {
   try {
+    process.stderr.write('[TRACE] executeInit start\n');
     const scope = await resolveScope(opts);
+    process.stderr.write(`[TRACE] scope=${scope}\n`);
     const answers = await gatherCredentials(opts);
+    process.stderr.write(`[TRACE] answers=${JSON.stringify(Object.keys(answers))} provider=${answers.llmProvider}\n`);
     saveConnection(
       {
         llmProvider: answers.llmProvider,
@@ -94,7 +98,7 @@ async function resolveScope(flags) {
   const interactive = process.stdin.isTTY && process.stdout.isTTY;
   if (!interactive) return defaultScope;
 
-  const { scope } = await inquirer.prompt([
+  const { scope } = await withPrompt(() => inquirer.prompt([
     {
       type: 'list',
       name: 'scope',
@@ -105,7 +109,7 @@ async function resolveScope(flags) {
         { name: 'Local — this project only', value: SCOPE_LOCAL },
       ],
     },
-  ]);
+  ]));
   return scope;
 }
 
@@ -146,6 +150,6 @@ async function gatherCredentials(flags) {
 
   if (prompts.length === 0) return resolved;
 
-  const answers = await inquirer.prompt(prompts);
+  const answers = await withPrompt(() => inquirer.prompt(prompts));
   return { ...resolved, ...answers };
 }

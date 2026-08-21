@@ -7,6 +7,7 @@ import inquirer from 'inquirer';
 import { Command } from 'commander';
 
 import { disconnect, isConfigured } from '../services/configStore.js';
+import { withPrompt } from '../ui/ink/promptGuard.js';
 import * as output from '../utils/output.js';
 
 export async function executeDisconnect(opts) {
@@ -16,14 +17,14 @@ export async function executeDisconnect(opts) {
       return;
     }
     if (!opts.yes) {
-      const { confirm } = await inquirer.prompt([
+      const { confirm } = await withPrompt(() => inquirer.prompt([
         {
           type: 'confirm',
           name: 'confirm',
           message: 'Remove all stored credentials?',
           default: false,
         },
-      ]);
+      ]));
       if (!confirm) {
         output.info('Aborted — credentials were kept.');
         return;

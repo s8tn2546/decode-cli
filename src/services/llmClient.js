@@ -29,8 +29,8 @@ const PROVIDER_BASE_URLS = {
 const DEFAULT_MODELS = {
   anthropic: 'claude-sonnet-4-5',
   openai: 'gpt-4o-mini',
-  // Verified live on Groq's production model list (2026-08): llama-3.1-8b-instant.
-  groq: 'llama-3.1-8b-instant',
+  // Verified live on Groq's production model list (2026-08-21): openai/gpt-oss-20b.
+  groq: 'openai/gpt-oss-20b',
   other: 'gpt-4o-mini',
 };
 
@@ -114,7 +114,7 @@ export async function generateSummary(prompt, options = {}) {
   }
 
   const base = process.env.LLM_PROVIDER_BASE_URL || PROVIDER_BASE_URLS[provider];
-  const model = DEFAULT_MODELS[provider] || DEFAULT_MODELS.other;
+  const model = process.env.LLM_MODEL || DEFAULT_MODELS[provider] || DEFAULT_MODELS.other;
   const url =
     provider === 'anthropic' ? `${base}/v1/messages` : chatCompletionsEndpoint(base);
 
@@ -137,7 +137,7 @@ export async function generateSummary(prompt, options = {}) {
         ...(tools ? { tools } : {}),
       }),
     });
-    if (!res.ok) throw new Error(`LLM request failed with status ${res.status}`);
+    if (!res.ok) throw await responseError(res);
     const data = await res.json();
 
     if (tools && Array.isArray(data.content)) {
@@ -163,7 +163,7 @@ export async function generateSummary(prompt, options = {}) {
       ...(tools ? { tools } : {}),
     }),
   });
-  if (!res.ok) throw new Error(`LLM request failed with status ${res.status}`);
+  if (!res.ok) throw await responseError(res);
   const data = await res.json();
   const message = data.choices?.[0]?.message;
 
@@ -182,6 +182,27 @@ export async function generateSummary(prompt, options = {}) {
   }
 
   return message?.content ?? '';
+}
+
+/**
+ * Builds an Error for a non-OK provider response, including the provider's own
+ * error message when one is present (e.g. "model decommissioned", rate limit,
+ * invalid key) so failures are diagnosable instead of a bare status code.
+ * Never includes request headers or the API key (AGENTS.md rule 3).
+ */
+async function responseError(res) {
+  let detail = '';
+  try {
+    const body = await res.text();
+    try {
+      detail = JSON.parse(body)?.error?.message || '';
+    } catch {
+      detail = body.slice(0, 200);
+    }
+  } catch {
+    // no readable body
+  }
+  return new Error(`LLM request failed with status ${res.status}${detail ? `: ${detail}` : ''}`);
 }
 
 function safeParseJson(raw) {

@@ -5,6 +5,7 @@
  * Philosophy: Never assume terminal capabilities. Detect, fallback gracefully.
  * Abstract raw terminal access so the rest of the system stays clean.
  */
+import { isCapturingOutput, pushCapturedOutput } from './ink/outputCapture.js';
 
 /**
  * Detect if we're in a TTY environment.
@@ -151,6 +152,10 @@ export function getCapabilities() {
  * @param {string} text
  */
 export function write(text) {
+  if (isCapturingOutput()) {
+    pushCapturedOutput(text);
+    return;
+  }
   process.stdout.write(text);
 }
 
@@ -159,6 +164,10 @@ export function write(text) {
  * @param {string} text
  */
 export function writeLine(text = '') {
+  if (isCapturingOutput()) {
+    pushCapturedOutput(text);
+    return;
+  }
   process.stdout.write(text + '\n');
 }
 

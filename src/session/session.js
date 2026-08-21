@@ -3,7 +3,7 @@
  * Interactive REPL session — `decode` with no arguments.
  */
 import readline from 'readline';
-import { readConfig } from '../services/configStore.js';
+import { readConfig, isConfigured } from '../services/configStore.js';
 import * as output from '../utils/output.js';
 
 import { executeApiList, executeApiCheck } from '../commands/api.js';
@@ -235,6 +235,22 @@ async function startReadlineSession(config) {
   rl.on('line', async (line) => {
     const raw = line.trim();
     const result = await dispatchCommand(raw, config);
+
+    // Clean up stdin state after commands that may have used inquirer.
+    // Inquirer puts stdin into raw mode and adds keypress listeners;
+    // without cleanup readline won't receive subsequent input.
+    if (process.stdin.isTTY) {
+      try {
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+        process.stdin.removeAllListeners('data');
+        process.stdin.removeAllListeners('keypress');
+        process.stdin.resume();
+      } catch (_) {
+        // Ignore — stdin may already be in a clean state
+      }
+    }
+
     if (result.type === 'exit') {
       rl.close();
       return;
@@ -262,11 +278,30 @@ export async function startSession() {
     return startReadlineSession(config);
   }
 
+  // First-run setup: if DeCode isn't configured yet, run the interactive init
+  // wizard BEFORE Ink starts. This prevents /init from having to prompt after
+  // Ink is already rendering — both would write to stdout and corrupt the
+  // terminal. After init, reload the config so the banner reflects it.
+  if (!isConfigured()) {
+    await executeInit({});
+    // Inquirer leaves stdin in a dirty state (raw mode, keypress listeners).
+    // Clean up before Ink starts so its raw-mode input works correctly.
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      ['data', 'end', 'keypress'].forEach((event) => {
+        process.stdin.removeAllListeners(event);
+      });
+      process.stdin.resume();
+    }
+  }
+  const reloadedConfig = readConfig();
+
   // TTY path: Ink UI
   // Dynamic imports keep Ink entirely out of the non-TTY code path.
   const { render } = await import('ink');
   const React = (await import('react')).default;
   const { default: App } = await import('../ui/ink/App.jsx');
 
-  render(React.createElement(App, { config }));
+  render(React.createElement(App, { config: reloadedConfig }));
 }

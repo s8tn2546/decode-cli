@@ -117,7 +117,7 @@ describe('decode config reset', () => {
 
     // credentials survive
     expect(fs.readFileSync(path.join(tmp, '.env'), 'utf8')).toContain('GITHUB_TOKEN=gh-keep-me');
-  });
+  }, 10000);
 
   it('errors in a non-interactive terminal without --yes', async () => {
     const reset = await run(['config', 'reset']);

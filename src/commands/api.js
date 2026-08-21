@@ -16,6 +16,7 @@
  * derived from source, never hand-maintained.
  */
 import { Command } from 'commander';
+import { isInInkSession } from '../ui/ink/promptGuard.js';
 import ora from 'ora';
 
 import { API_CHECK_TIMEOUT_MS } from '../constants.js';
@@ -150,7 +151,7 @@ export async function executeApiCheck(pathFilters, opts) {
 
     const spec = opts.spec ? await loadSpec(opts.spec) : null;
 
-    const useSpinner = !opts.json && !opts.ci && process.stdout.isTTY;
+    const useSpinner = !opts.json && !opts.ci && !isInInkSession() && process.stdout.isTTY;
     const spinner = useSpinner
       ? ora(`Checking ${plural(selected.length, 'route')} against ${base}...`).start()
       : null;

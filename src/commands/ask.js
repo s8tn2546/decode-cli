@@ -17,6 +17,7 @@ import { Command } from 'commander';
 import ora from 'ora';
 
 import { ASSISTANT_SYSTEM_PROMPT } from '../services/assistantPrompt.js';
+import { withPrompt, isInInkSession } from '../ui/ink/promptGuard.js';
 import { buildProjectContext, PROJECT_CONTEXT_BUDGET } from '../services/projectContext.js';
 import { generateSummary, isLlmConfigured } from '../services/llmClient.js';
 import * as ui from '../ui/index.js';
@@ -59,13 +60,13 @@ async function resolveQuestion(question, _opts) {
     renderError(new Error('No question provided. Pass a question argument or run interactively.'));
     return null;
   }
-  const answers = await inquirer.prompt([
+  const answers = await withPrompt(() => inquirer.prompt([
     {
       type: 'input',
       name: 'question',
       message: 'What do you want to know about this project?',
     },
-  ]);
+  ]));
   return answers.question || null;
 }
 
@@ -96,7 +97,7 @@ async function runAssistant(question, context, opts) {
     `User question: ${question}`,
   ].join('\n');
 
-  const spinner = process.stdout.isTTY ? ora('Thinking...').start() : null;
+  const spinner = !isInInkSession() && process.stdout.isTTY ? ora('Thinking...').start() : null;
   let answer;
   try {
     answer = await generateSummary(prompt, { verbose: opts.verbose });

@@ -22,6 +22,7 @@ import {
   SCOPE_GLOBAL,
   SCOPE_LOCAL,
 } from '../services/configStore.js';
+import { withPrompt } from '../ui/ink/promptGuard.js';
 import * as output from '../utils/output.js';
 
 export function configCommand() {
@@ -85,14 +86,14 @@ export async function executeConfigReset(opts) {
         process.exitCode = 1;
         return;
       }
-      const { confirm } = await inquirer.prompt([
+      const { confirm } = await withPrompt(() => inquirer.prompt([
         {
           type: 'confirm',
           name: 'confirm',
           message: 'Reset the local decode.config.json to defaults? (stored credentials in .env are kept)',
           default: false,
         },
-      ]);
+      ]));
       if (!confirm) {
         output.info('Skipped — configuration was kept.');
         return;

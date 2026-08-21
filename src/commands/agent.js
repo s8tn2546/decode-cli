@@ -10,11 +10,12 @@
  * applied after explicit user approval.
  */
 
-import readline from 'node:readline';
 import { spawnSync } from 'node:child_process';
 import { Command } from 'commander';
 import ora from 'ora';
 import chalk from 'chalk';
+import inquirer from 'inquirer';
+import { withPrompt, isInInkSession } from '../ui/ink/promptGuard.js';
 
 import { runAgent, MAX_ITERATIONS } from '../services/agent.js';
 import {
@@ -121,11 +122,6 @@ async function resolveGoal(goal, opts) {
 }
 
 async function promptForApproval(proposals) {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-
   const filePaths = proposals.map((p) => p.path);
   const totalAdditions = proposals.reduce((sum, p) => {
     const diff = generateUnifiedDiff(p.originalContent, p.proposedContent, p.path);
@@ -158,17 +154,20 @@ async function promptForApproval(proposals) {
     }
   }
 
-  const answer = await new Promise((resolve) => {
-    rl.question('Apply these changes? [y/N] ', resolve);
-  });
-
-  rl.close();
-  return answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes';
+  const { approve } = await withPrompt(() => inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'approve',
+      message: 'Apply these changes?',
+      default: false,
+    },
+  ]));
+  return approve;
 }
 
 async function renderInteractiveAgent(goal, opts) {
   const isTTY = process.stdout.isTTY;
-  const spinner = isTTY ? ora('Agent working...').start() : null;
+  const spinner = !isInInkSession() && isTTY ? ora('Agent working...').start() : null;
   const workflow = [];
   let result;
   let verifyResult = null;
@@ -426,7 +425,7 @@ async function runVerifyFlow(verifyCommand, projectRoot, verifyTimeout = VERIFY_
     output.heading('Verifying changes');
     output.plain('');
   }
-  const verifySpinner = isTTY ? ora('Running verification...').start() : null;
+    const verifySpinner = !isInInkSession() && isTTY ? ora('Running verification...').start() : null;
   let verifyResult = precomputedResult;
   if (!verifyResult) {
     try {
@@ -489,7 +488,7 @@ async function runAutoFixFlow(verifyResult, verifyCommand, projectRoot, verifyTi
 
     const fixGoal = `Verification failed.\n\n${diagnosticContext}\n\nInvestigate the failure and propose the smallest safe fix. Do not modify files directly. Use propose_change to describe any changes.`;
 
-    const fixSpinner = isTTY ? ora('Agent investigating failure...').start() : null;
+    const fixSpinner = !isInInkSession() && isTTY ? ora('Agent investigating failure...').start() : null;
     let fixResult;
     try {
       fixResult = await runAgent(fixGoal, projectRoot, {

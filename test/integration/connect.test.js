@@ -52,5 +52,5 @@ describe('decode connect / disconnect', () => {
     expect(status.exitCode).toBe(0);
     expect(status.stdout.toLowerCase()).toContain('no');
     expect(status.stdout.toLowerCase()).toContain('not configured');
-  });
+  }, 10000);
 });

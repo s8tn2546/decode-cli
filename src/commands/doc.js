@@ -20,6 +20,7 @@ import path from 'node:path';
 import { generateArchitecture, explain } from '../services/docGenerator.js';
 import { checkDocStaleness } from '../services/docStaleness.js';
 import { scanProject } from '../services/projectScanner.js';
+import { withPrompt, isInInkSession } from '../ui/ink/promptGuard.js';
 import * as output from '../utils/output.js';
 
 const DEFAULT_OUTPUT = 'docs/architecture.md';
@@ -74,7 +75,9 @@ export async function executeDoc(message, opts) {
     const project = scanProject();
     output.dim(`Scanned ${project.tree.length} files across the project.`);
 
-    const spinner = process.stdout.isTTY ? ora('Generating documentation...').start() : null;
+    // Skip the ora spinner inside the Ink session — it writes directly to stdout
+    // and would corrupt Ink's renderer. Output still flows via App.jsx capture.
+    const spinner = !isInInkSession() && process.stdout.isTTY ? ora('Generating documentation...').start() : null;
     let markdown;
     try {
       markdown = await generateArchitecture(project, { instruction: message, verbose: opts.verbose });
@@ -97,14 +100,14 @@ export async function executeDoc(message, opts) {
         process.exitCode = 1;
         return;
       }
-      const { confirm } = await inquirer.prompt([
+      const { confirm } = await withPrompt(() => inquirer.prompt([
         {
           type: 'confirm',
           name: 'confirm',
           message: `Write documentation to ${target}?`,
           default: false,
         },
-      ]);
+      ]));
       if (!confirm) {
         output.info('Skipped — nothing was written.');
         return;
@@ -125,7 +128,7 @@ async function explainFlow(message, opts) {
     const instruction = typeof opts.explain === 'string' ? opts.explain : message;
     const project = scanProject();
 
-    const spinner = process.stdout.isTTY ? ora('Explaining the project...').start() : null;
+    const spinner = !isInInkSession() && process.stdout.isTTY ? ora('Explaining the project...').start() : null;
     let text;
     try {
       text = await explain(project, { instruction, verbose: opts.verbose });

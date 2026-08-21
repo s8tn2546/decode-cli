@@ -22,7 +22,7 @@ afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-function stubFetch({ status = 200, json }) {
+function stubFetch({ status = 200, json, text }) {
   const fn = async (url, options = {}) => {
     fn._url = url;
     fn._options = options;
@@ -30,6 +30,7 @@ function stubFetch({ status = 200, json }) {
       ok: status >= 200 && status < 300,
       status,
       json: async () => (typeof json === 'function' ? json() : json),
+      text: async () => (typeof text === 'function' ? text() : text ?? JSON.stringify(json ?? {})),
     };
   };
   return fn;
@@ -102,7 +103,31 @@ describe('llmClient', () => {
     expect(fetchImpl._url).toBe('https://api.groq.com/openai/v1/chat/completions');
     expect(fetchImpl._options.headers.authorization).toBe('Bearer gsk-test');
     const body = JSON.parse(fetchImpl._options.body);
-    expect(body.model).toBe('llama-3.1-8b-instant');
+    expect(body.model).toBe('openai/gpt-oss-20b');
+  });
+
+  it('prefers the LLM_MODEL env override over the provider default', async () => {
+    saveConnection({ llmProvider: 'groq', llmApiKey: 'gsk-test' }, { cwd: tmp });
+    process.env.LLM_MODEL = 'qwen/qwen3.6-27b';
+    const fetchImpl = stubFetch({ json: () => ({ choices: [{ message: { content: 'x' } }] }) });
+    try {
+      await generateSummary('summarize', { cwd: tmp, fetchImpl });
+      expect(JSON.parse(fetchImpl._options.body).model).toBe('qwen/qwen3.6-27b');
+    } finally {
+      delete process.env.LLM_MODEL;
+    }
+  });
+
+  it('includes the provider error message when the request fails', async () => {
+    saveConnection({ llmProvider: 'groq', llmApiKey: 'gsk-test' }, { cwd: tmp });
+    const fetchImpl = stubFetch({
+      status: 404,
+      text: () => Promise.resolve(JSON.stringify({ error: { message: 'model decommissioned' } })),
+    });
+
+    await expect(
+      generateSummary('summarize', { cwd: tmp, fetchImpl }),
+    ).rejects.toThrow('LLM request failed with status 404: model decommissioned');
   });
 
   it('does not duplicate /v1 when a base URL override already ends in /v1', async () => {
